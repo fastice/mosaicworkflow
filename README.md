@@ -2,6 +2,8 @@
 
 This repository contains the Python code used to produce the velocity and image mosaics for the Greenland Ice Mapping Project (GrIMP). Mosaics are produced by call a set of C-languge programs, which can be accessed from [here](https://github.com/fastice/mosaicSource).
 
+This is production code. Most users will be better served by an extensive set of [Jupyter Notebooks and Python packages](https://github.com/fastice/GrIMPTools) to work with the GrIMP products.
+
 ## Program Descriptions
 
 The following command line applications generate velocity and image mosaics by calling the C-language command-line [modules](https://github.com/fastice/mosaicSource). Each of the C-routines is single-threaded. To apply parallism, the Python modules chunk up so that it can be processed with multiple threads, which are then reassembled to produce the final product. 
