@@ -15,3 +15,7 @@ Outputs are all the final archive-ready products that get delivered to NSIDC.
 **setupimagemosaic.py**: Produces a single image mosaic or a mosaic with sigma0 and gamma0 bands. As with the velocity mosaics, the product is chunked up, farmed to several threads, and then reassembled.
 
 **makeimagemosics.py** Peforms the necessary preprocessing steps to produce a series of image mosaics using **setupimagemosaic.py**.
+
+## For Further Information
+
+Please address questions to ![](https://github.com/fastice/GrIMPTools/blob/main/Email.png).
