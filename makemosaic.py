@@ -26,13 +26,16 @@ def makemosaicArgs():
     parser.add_argument('--lastdate', type=str, default=defaultEnd,
                         help=f'Use central dates <= lastdate [{defaultEnd}]')
     parser.add_argument('--interval', type=str,
-                        choices=['s1cycle', 'monthly', 'quarterly', 'annual',
-                                 'multiYear'], default='monthly',
+                        choices=['s1cycle', 's1-12day', 'monthly', 'quarterly',
+                                 'annual', 'multiYear'], default='monthly',
                         help='time interval spanned')
     parser.add_argument('--region', type=str,
                         choices=['greenland', 'amundsen', 'taku'],
                         default='greenland',
-                        help='region code')
+                        help='region code if not customRegion')
+    parser.add_argument('--customRegion', type=str,
+                        default=None,
+                        help='yml file with custom region specification')
     parser.add_argument('--noReprocess', action='store_true', default=False,
                         help='Just reformat data')
     parser.add_argument('--noLandsat', action='store_true', default=False,
@@ -55,9 +58,12 @@ def makemosaicArgs():
     firstDate = adjustFirstDate(datetime.strptime(args.firstdate, "%Y-%m-%d"),
                                 args.interval, args.region)
     endDate = datetime.strptime(args.lastdate, "%Y-%m-%d")
+    if args.customRegion is not None:
+        args.region = 'custom'
     myArgs = {'firstDate': firstDate, 'lastDate': endDate,
               'interval': args.interval, 'noReprocess': args.noReprocess,
-              'check': args.check, 'region': args.region, 'mask': args.mask,
+              'check': args.check, 'region': args.region,
+              'customRegion': args.customRegion, 'mask': args.mask,
               'keepFast': args.keepFast, 'baseFlags': args.baseFlags,
               'noLandsat': args.noLandsat, 'fitType': args.LSFitType}
     return myArgs
@@ -70,14 +76,19 @@ def adjustFirstDate(firstdate, interval, region):
     firstdateOrig = firstdate
     quarterlyDates = {'greenland': [0, 12, 12, 3, 3, 3, 6, 6, 6, 9, 9, 9, 12],
                       'amundsen': [0, 1, 1, 1, 4, 4, 4, 7, 7, 7, 10, 10, 10],
-                      'taku': [0, 1, 1, 1, 4, 4, 4, 7, 7, 7, 10, 10, 10]}
+                      'taku': [0, 1, 1, 1, 4, 4, 4, 7, 7, 7, 10, 10, 10],
+                      'custom': [0, 1, 1, 1, 4, 4, 4, 7, 7, 7, 10, 10, 10]}
     quarterlyMonths = {'greenland': 2, 'amundsen': 0, 'taku': 0}
     annualDates = {'greenland': datetime(firstdate.year, 12, 1),
                    'amundsen': datetime(firstdate.year, 1, 1),
+                   'custom': datetime(firstdate.year, 1, 1),
                    'taku': datetime(firstdate.year, 1, 1)}
     #
-    if interval == 's1cycle':
-        myDates = mosf.standardDates()
+    if interval == 's1cycle' or interval == 's1-12day':
+        if interval == 's1-12day':
+            myDates = mosf.standardDates(nDays=12)
+        else:
+            myDates = mosf.standardDates()
         myDates.reverse()
         for myDate in myDates:  # look through possible dates until first valid
             if myDate['date1'] <= firstdate:
@@ -117,9 +128,13 @@ def incrementDate(myDate, interval):
     '''  increment by a s1 cycle, month, quarter, or year'''
     if interval == 's1cycle':
         date6 = datetime(2016, 9, 20)  # Transition from 12 to 6 day
-        dT = [timedelta(days=12), timedelta(days=6)][myDate > date6]
-        myDate = myDate + dT
-        return myDate
+        if myDate > date6 and myDate <= datetime(2021, 12, 24):
+            dT = timedelta(days=6)
+        else:
+            dT = timedelta(days=12)
+        return myDate + dT
+    if interval == 's1-12day':
+        return myDate + timedelta(days=12)
     # All other intervales
     dT = {'monthly': 32, 'quarterly': 93, 'annual': 367}[interval]
     myDate = myDate + timedelta(days=dT)
@@ -173,6 +188,7 @@ def getNewMask(interval, firstDate, lastDate):
     maskPath = {'quarterly': f'{maskPath}/quartermasks/greenlandmask20YYSS',
                 'monthly': f'{maskPath}/output20YY/greenlandmaskSS20YY',
                 's1cycle': f'{maskPath}/output20YY/greenlandmaskSS20YY',
+                's1-12day': f'{maskPath}/output20YY/greenlandmaskSS20YY',
                 'annual':
                     f'{maskPath}/annualmasks/greenlandmask20YYA',
                 'multiYear':
@@ -184,6 +200,8 @@ def getNewMask(interval, firstDate, lastDate):
                              'ls', 'ls', 'ew', 'ew'],
                  's1cycle': ['lw', 'lw', 'lw', 'sp', 'sp', 'ms', 'ms', 'ms',
                              'ls', 'ls', 'ew', 'ew'],
+                 's1-12day': ['lw', 'lw', 'lw', 'sp', 'sp', 'ms', 'ms', 'ms',
+                              'ls', 'ls', 'ew', 'ew'],
                  'annual': ['A']*12,
                  'multiYear': ['A']*12}[interval]
     #
@@ -206,12 +224,12 @@ def getGreenlandMask(interval, firstDate, lastDate, keepFast):
                2016: f'{maskPath}/Winter201617/greenlandmask201617'}
     annmasks = {2015: f'{maskPath}/annualmasks/greenlandmask2015A',
                 2016: f'{maskPath}/annualmasks/greenlandmask2016A'}
-    oldMasks = {'s1cycle': mqmasks, 'monthly': mqmasks, 'quarterly': mqmasks,
-                'annual': annmasks}
+    oldMasks = {'s1cycle': mqmasks, 's1-12day': mqmasks, 'monthly': mqmasks,
+                'quarterly': mqmasks, 'annual': annmasks}
     #
     if firstDate < datetime(2016, 12, 1):
-        if interval in ['s1cycle', 'quarterly', 'monthly']:
-            myYear = (firstDate-timedelta(days=182)).year
+        if interval in ['s1cycle', 's1-12day', 'quarterly', 'monthly']:
+            myYear = max((firstDate-timedelta(days=182)).year, 2014)
         else:
             myYear = (firstDate+timedelta(days=182)).year
         maskFile = oldMasks[interval][myYear]
@@ -224,10 +242,14 @@ def getGreenlandMask(interval, firstDate, lastDate, keepFast):
 
 
 def makeCommand(firstDate, lastDate, noReprocess, listFile, maskFile, region,
-                interval, keepFast, baseFlags):
+                customRegion, interval, keepFast, baseFlags):
     ''' setup and return command '''
     #
-    command = f'setupquarters.py -{region} -firstdate='
+    if customRegion is not None:
+        regionUsed = f'customRegion={customRegion}'
+    else:
+        regionUsed = region
+    command = f'setupquarters.py -{regionUsed} -firstdate='
     command += firstDate.strftime('%Y-%m-%d')
     command += ['', ' -noReprocess '][noReprocess]
     command += f' -lastdate={lastDate.strftime("%Y-%m-%d")} '
@@ -238,7 +260,7 @@ def makeCommand(firstDate, lastDate, noReprocess, listFile, maskFile, region,
     if region == 'greenland' and interval != 's1cycle' and \
             listFile is not None:
         command += f'-lsFile={listFile}'
-    if interval == 's1cycle':
+    if interval == 's1cycle' or interval == 's1-12day':
         command += ' -noTSX'
     command += ' -inputFile=track-all/inputFile '
     if maskFile is not None:
@@ -260,7 +282,8 @@ def main():
     else:
         mergedList = None
     print('Date range', myArgs['firstDate'], myArgs['lastDate'])
-
+    print(myArgs)
+    # exit()
     #
     currentFirstDate = myArgs['firstDate']
     currentLastDate, year = findLastDate(currentFirstDate, myArgs)
@@ -277,7 +300,8 @@ def main():
         # setup command
         command = makeCommand(currentFirstDate, currentLastDate,
                               myArgs['noReprocess'], mergedList, maskFile,
-                              myArgs['region'], myArgs['interval'],
+                              myArgs['region'], myArgs['customRegion'],
+                              myArgs['interval'],
                               myArgs['keepFast'], myArgs['baseFlags'])
         if not myArgs['check']:
             call(command, shell=True, executable='/bin/csh')

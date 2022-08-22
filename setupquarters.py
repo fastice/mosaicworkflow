@@ -10,13 +10,21 @@ import threading
 import pyproj
 import shutil
 import shapefile
+import yaml
 
 # Currently this is hardwired here since this program only works for greenland.
 # It could be used for future expansion to Antarctica I have tried to use it to
 # flag ice sheet specific stuff
 
 iceSheetRegion = 'greenland'
-currentVersions = {'s1cycle': 1, 'Monthly': 3, 'Quarterly': 3, 'Annual': 3,
+iceSheetRegionFile = None
+myProjWin = None
+llCorners = None
+regionDefs = None
+outputMaskTemplate = None
+regionID = None
+
+currentVersions = {'s1cycle': 2, 'Monthly': 4, 'Quarterly': 4, 'Annual': 4,
                    'multiYear': 1}
 subVersions = {'s1cycle': 0, 'Monthly': 0, 'Quarterly': 0, 'Annual': 0,
                'multiYear': 0}
@@ -78,10 +86,12 @@ def processQArg(argv):
     noReprocess = False
     noCull = False
     helpFlag = False
+    customRegion = None
     # for now this is not an option, but allows for a change later
     cloudOptimize = True
     print('\n')
     global iceSheetRegion
+    global iceSheetRegionFile
     try:
         for myStr in argv[1:]:
             print(myStr)
@@ -122,6 +132,10 @@ def processQArg(argv):
             elif '-noCull' in myStr:
                 noCull = True
                 print('noCull = ', noCull)
+            elif '-customRegion' in myStr:
+                iceSheetRegionFile = myStr.split('=')[-1]
+                iceSheetRegion = 'custom'
+                print('customRegion = ', customRegion)
             elif '-amundsen' in myStr:
                 iceSheetRegion = 'amundsen'
             elif '-greenland' in myStr:
@@ -137,7 +151,7 @@ def processQArg(argv):
         if type(firstDate) is str or type(lastDate) is str:
             u.myerror('no first and/or last date specficied')
         #
-        print(iceSheetRegion)
+        print(iceSheetRegion, iceSheetRegionFile)
         if helpFlag:
             usageQ()
         return baseFlags, inputFile, lsFile, firstDate, lastDate, noTSX,\
@@ -156,51 +170,74 @@ def readWKT(wktFile):
     with open(wktFile, 'r') as fp:
         return fp.readline()
 
+def readCustomFile(key=None):
+    try:
+        with open(iceSheetRegionFile) as fp:
+            result = yaml.load(fp, Loader=yaml.FullLoader)
+            print(result)
+            if key is None:
+                return result
+            else:
+                return result[key]
+    except Exception:
+        u.myerror(f'readCustomFile: {iceSheetRegionFile} with {key} '
+                  'could not be parsed')
+
 
 def projWin(region):
+    global myProjWin
+    global llCorners
     # add other regions here
-    wktFile = s.defaultRegionDefs(region).wktFile()
-    if wktFile is not None:
-        epsg = None
-        projStr = readWKT(wktFile)
+    wktFile = regionDefs.wktFile()
+    if iceSheetRegion != 'custom':
+        if wktFile is not None:
+            epsg = None
+            projStr = readWKT(wktFile)
+        else:
+            epsg = regionDefs.epsg()
+            projStr = f'EPSG:{epsg}'
+        projDict = {'greenland': {'xmin': -659100.0, 'xmax': 857900.0,
+                                  'ymin': -3379100.0, 'ymax': -639100.0,
+                                  'dx': 200, 'dy': 200, 'epsg': epsg,
+                                  'proj': projStr},
+                    'amundsen': {'xmin': -2000125.0, 'xmax': -1020125.0,
+                                 'ymin': -1250125.0, 'ymax': 289875.0,
+                                 'dx': 250, 'dy': 250, 'epsg': epsg,
+                                 'proj': projStr},
+                    'taku': {'xmin': -147100.0, 'xmax': 163900.,
+                             'ymin': -3431100.0, 'ymax': -3208100.0,
+                             'dx': 200, 'dy': 200, 'epsg': epsg, 'proj': projStr},
+                    'amundsenOld': {'xmin': -1904125.0, 'xmax': -1084125.0,
+                                    'ymin': -1200125.0, 'ymax': 199875.0,
+                                    'dx': 250, 'dy': 250, 'epsg': epsg,
+                                    'proj': projStr}}
     else:
-        epsg = s.defaultRegionDefs(region).epsg()
-        projStr = f'EPSG:{epsg}'
-    projDict = {'greenland': {'xmin': -659100.0, 'xmax': 857900.0,
-                              'ymin': -3379100.0, 'ymax': -639100.0,
-                              'dx': 200, 'dy': 200, 'epsg': epsg,
-                              'proj': projStr},
-                'amundsen': {'xmin': -2000125.0, 'xmax': -1020125.0,
-                             'ymin': -1250125.0, 'ymax': 289875.0,
-                             'dx': 250, 'dy': 250, 'epsg': epsg,
-                             'proj': projStr},
-                'taku': {'xmin': -147100.0, 'xmax': 163900.,
-                         'ymin': -3431100.0, 'ymax': -3208100.0,
-                         'dx': 200, 'dy': 200, 'epsg': epsg, 'proj': projStr},
-                'amundsenOld': {'xmin': -1904125.0, 'xmax': -1084125.0,
-                                'ymin': -1200125.0, 'ymax': 199875.0,
-                                'dx': 250, 'dy': 250, 'epsg': epsg,
-                                'proj': projStr}}
+        projDict = {}
+        projDict['custom'] = readCustomFile('projDict')
+        regionDef = readCustomFile('regionDef')
+        if regionDef['wktFile'] is not None:
+            projStr = readWKT(regionDef['wktFile'])
+            projDict['proj'] = projStr
     # use try to avoid invalid regions
     try:
-        myProj = projDict[region]
+        myProjWin = projDict[region]
     except Exception:
         u.myerror(f'invalid region={region} in projWin ')
     # compute Corners
     # llproj = pyproj.Proj('+init=EPSG:4326')
     # xyproj = pyproj.Proj(f'+init=EPSG:{myProj["epsg"]}')
     xyllXform = pyproj.Transformer.from_crs(projStr, 'epsg:4326')
-    latll, lonll = xyllXform.transform(myProj['xmin'], myProj['ymin'])
-    latur, lonur = xyllXform.transform(myProj['xmax'], myProj['ymax'])
-    latlr, lonlr = xyllXform.transform(myProj['xmax'], myProj['ymin'])
-    latul, lonul = xyllXform.transform(myProj['xmin'], myProj['ymax'])
+    latll, lonll = xyllXform.transform(myProjWin['xmin'], myProjWin['ymin'])
+    latur, lonur = xyllXform.transform(myProjWin['xmax'], myProjWin['ymax'])
+    latlr, lonlr = xyllXform.transform(myProjWin['xmax'], myProjWin['ymin'])
+    latul, lonul = xyllXform.transform(myProjWin['xmin'], myProjWin['ymax'])
     llCorners = {'ll': {'lat': latll, 'lon': lonll},
                  'lr': {'lat': latlr, 'lon': lonlr},
                  'ur': {'lat': latur, 'lon': lonur},
                  'ul': {'lat': latul, 'lon': lonul}}
     print(llCorners)
     # 'amundsen': ' -1904125.0 199875.0 -1084125.0 -1000125.0  -tr 250 250 ' }
-    return myProj, llCorners
+
 
 # -----------------------------------------------------------------------------
 # set up predefined quadrants
@@ -215,20 +252,18 @@ def setupQuadrants():
                      'northeast': [110., -2466., 740., 1146., .2, .2],
                      'northwest': [-626., -2466., 736., 1146., .2, .2],
                      'south': [-410., -3356., 915., 890., .2, .2]}
-    elif iceSheetRegion == 'amundsen':
-        names = ['amundsen']
-        quadrants = {'amundsen': [-2000, -1250, 980, 1540, 0.25, 0.25]}
-    elif iceSheetRegion == 'taku':
-        names = ['taku']
-        myProj, _ = projWin(iceSheetRegion)
-        x0 = (myProj['xmin'] + myProj['dx']*0.5)/1000.
-        y0 = (myProj['ymin'] + myProj['dy']*0.5)/1000.
-        sx = (myProj['xmax'] - myProj['xmin'])/1000.
-        sy = (myProj['ymax'] - myProj['ymin'])/1000.
-        quadrants = {'taku': [x0, y0, sx, sy, myProj['dx']/1000.,
-                              myProj['dy']/1000.]}
-        # print(quadrants)
-        # u.myerror('stop')
+    #elif iceSheetRegion == 'amundsen':
+    #    names = ['amundsen']
+    #    quadrants = {'amundsen': [-2000, -1250, 980, 1540, 0.25, 0.25]}
+    elif iceSheetRegion != 'greenland':
+        names = [iceSheetRegion]
+        #myProj, _ = projWin(iceSheetRegion)
+        x0 = (myProjWin['xmin'] + myProjWin['dx']*0.5)/1000.
+        y0 = (myProjWin['ymin'] + myProjWin['dy']*0.5)/1000.
+        sx = (myProjWin['xmax'] - myProjWin['xmin'])/1000.
+        sy = (myProjWin['ymax'] - myProjWin['ymin'])/1000.
+        quadrants = {names[0]: [x0, y0, sx, sy, myProjWin['dx']/1000.,
+                              myProjWin['dy']/1000.]}
     else:
         u.myerror('Other regions not yet implemented '+iceSheetRegion)
     return names, quadrants
@@ -323,6 +358,47 @@ def findLimitsQ(limits):
 # Write an input file filtered for date range.
 # ----------------------------------------------------------------------------
 
+def computeTSXSeasonCount(dataTakes, date1, date2):
+    ''' Count number of TSX summer scenes for each glacier in the year
+    defined by date1 and date2'''
+    seasonCount = {}
+    for dataTake in dataTakes:
+        seasonKey = {12: 'w', 1: 'w', 2: 'w',
+                     3: 'sp', 4: 'sp', 5: 'sp',
+                     6: 's', 7: 's', 8: 's',
+                     9: 'f', 10: 'f', 11: 'f'
+                     }
+        if 'TSX' in dataTake[1]:
+            if dataTake[0] >= date1 and dataTake[0] < date2:
+                glacierID = dataTake[1].split()[1].split('/')[-4]
+                if glacierID not in seasonCount:
+                    seasonCount[glacierID] = {'w': 0, 'sp': 0, 's': 0, 'f': 0}
+                seasonCount[glacierID][seasonKey[dataTake[0].month]] += 1.0
+    return seasonCount
+
+
+def setLineWeight(dataTake, seasonCount):
+    ''' Set weight to line 1/count. '''
+    seasonKey = {12: 'w', 1: 'w', 2: 'w',
+                 3: 'sp', 4: 'sp', 5: 'sp',
+                 6: 's', 7: 's', 8: 's',
+                 9: 'f', 10: 'f', 11: 'f'
+                 }
+    # return orig if no summer count
+    if seasonCount is None:
+        return dataTake[1]
+    #
+    glacierID = dataTake[1].split()[1].split('/')[-4]
+    # Return line if glacier not in summerCount
+    if glacierID not in seasonCount:
+        return dataTake[1]
+    season = seasonKey[dataTake[0].month]
+    count = min(max(1., seasonCount[glacierID][season]), 50.)
+    pieces = dataTake[1].split()
+    pieces[4] = f'{1/count:0.3f}'
+    newLine = ' '.join(pieces)
+    # print(newLine)
+    return newLine
 
 def writeInputFileQ(infile, limit, dataTakes, date1, date2, noCull):
     #
@@ -348,22 +424,41 @@ def writeInputFileQ(infile, limit, dataTakes, date1, date2, noCull):
             screenTSX = True
             print(screenTSX)
     productType = prodType(date1, date2)
+    #
+
     # now loop through data takes, keeping ones in range
+    if productType == 'Annual':
+        TSXSeasonCount = computeTSXSeasonCount(dataTakes, date1, date2)
+    #
     for dataTake in dataTakes:
         firstDate = dataTake[0]
         tmp = dataTake[1].split()
+        phaseFile = tmp[0]
         secondDate = firstDate + timedelta(float(tmp[3]))
         midDate = firstDate + timedelta(float(tmp[3])) * 0.5
+        # Reduce weight of TSX summer frame so large number of frames does not
+        # skew results in annual average.
+        if 'TSX' in dataTake[1] and productType == 'Annual':
+            dataTake[1] = setLineWeight(dataTake, TSXSeasonCount)
         #
         # if this a TSX case and screenTSX on
         # Added only images with center for 6/12 day pairs.
         if ('TSX' in dataTake[1] and screenTSX) or productType == 's1cycle':
             # then check midDate in the range, otherwise
+            # Fixed 6/7/22 - replaced <= date1 with < date1
             # use continue to skip this iteration
-            if midDate <= date1 or midDate >= date2:
+            if midDate < date1 or midDate >= date2:
                 continue
+        # This is setup to pass phase data from Oct/year-1 to March/year+1
+        # As such, it will provide roughly symmetrical annual average.
+        # Offsets will be preserved within years since they tend have full year
+        # at coasts.
+        if productType == 'Annual' and 'nophase' not in phaseFile:
+            dT1, dT2 = timedelta(-61), timedelta(121)
+        else:
+            dT1, dT2 = timedelta(0), timedelta(0)
         # pass dates with any amount of overlap
-        if secondDate >= date1 and firstDate <= date2:
+        if secondDate >= (date1+dT1) and firstDate <= (date2+dT2):
             if noCull:
                 new = changeToNoCull(dataTake[1])
             else:
@@ -377,6 +472,7 @@ def writeInputFileQ(infile, limit, dataTakes, date1, date2, noCull):
     # loop for actual lines
     for item in newList:
         print(';\n', item, file=fOut)
+    fOut.close()
     return
 
 
@@ -408,9 +504,16 @@ def runSubMosaic(outPath, inputFileName, outFileName, baseFlags, firstDate,
     # open outputs and check
     try:
         #
+        productType = prodType(firstDate, lastDate)
+        firstDateAdjusted, lastDateAdjusted = firstDate, lastDate
+        # This expands limits so the phase data can included.
+        # Offsets data should be filtered through the input.
+        if productType == 'Annual':
+            firstDateAdjusted = firstDateAdjusted + timedelta(-61)
+            lastDateAdjusted = lastDateAdjusted + timedelta(121)
         # run cull command if doCull set (otherwise only apply coverage
-        flags = baseFlags + ' -date1 ' + firstDate.strftime('%m-%d-%Y')
-        flags += ' -date2 ' + lastDate.strftime('%m-%d-%Y')
+        flags = baseFlags + ' -date1 ' + firstDateAdjusted.strftime('%m-%d-%Y')
+        flags += ' -date2 ' + lastDateAdjusted.strftime('%m-%d-%Y')
         if lsFile is not None:
             flags += ' -landSat '+lsFile
         command = f'cd {outPath}; mosaic3d -writeBlank -center {flags} ' \
@@ -469,14 +572,14 @@ def maskMosaics(quadNames, outputRegions, outDir, outputMaskShape, baseFlags):
     for quadName in quadNames:
         #
         # make mask for region quadName
-        print(outputRegions[quadName][1], outputMaskShape)
+        print(':', outputRegions[quadName][1], outputMaskShape)
         mask = u.makeMaskFromShape(outputRegions[quadName][1], outputMaskShape)
         # print(np.sum(mask), outputMaskShape)
         # print(outputRegions[quadName][1], outputMaskShape)
         # u.writeImage(outDir+'/masked/mask-'+quadName, mask, 'u1')
         # Process velocity
         velImage = u.geoimage(geoType='velocity', verbose=False)
-        print(outDir+'/intermediate/mosaic-'+quadName)
+        print('+', outDir+'/intermediate/mosaic-'+quadName)
         velImage.readData(outDir+'/intermediate/mosaic-'+quadName)
         # mask velocity
         if len(mask) > 1:
@@ -581,10 +684,9 @@ def mkQDirs(outDir, outputMaskTemplate):
         os.mkdir(outDir+'/shp')
     #
     # If no shape file specified, copy a template that takes out Ellesmere
+
     if outputMaskTemplate is None:
         template = True
-        outputMaskTemplate = \
-            f'/Users/ian/maskTemplates/{iceSheetRegion}Output.shp'
         if not os.path.exists(outputMaskTemplate):
             u.myerror(
                 f'mkQdirs: nonexistent mask template ({outputMaskTemplate})')
@@ -595,7 +697,8 @@ def mkQDirs(outDir, outputMaskTemplate):
         template = False
     #
     # Modify here for other regions.
-    if iceSheetRegion in ['greenland', 'amundsen', 'taku']:
+    if outputMaskTemplate is not None:
+
         # if this is a template file and it doesnt exits then copy or
         # if its a custome file then copy (overwrite existing if need be)
         # print(shpFileBase, template)
@@ -619,8 +722,8 @@ def writeQTiffs(quadNames, outDir, baseFlags):
     #
     # Loop over quadrants and write tiffs
     print('Writing tiffs....')
-    epsg = s.defaultRegionDefs(iceSheetRegion).wktFile()
-    wktFile = s.defaultRegionDefs(iceSheetRegion).wktFile()
+    epsg = regionDefs.wktFile()
+    wktFile = regionDefs.wktFile()
     #
     for quadName in quadNames:
         velImage = u.geoimage(geoType='velocity', verbose=False)
@@ -642,14 +745,6 @@ def writeQTiffs(quadNames, outDir, baseFlags):
             dT.writeMyTiff(outDir+'/tiff/'+quadName+'.dT', epsg=epsg,
                            wktFile=wktFile, noDataDefault=-2.0e9)
             dT = []
-    # moved to makeShapeOutputs
-    # stdout,stderr=open(outDir+'/io/stderr','w'),open(outDir+'/io/stdout','w')
-    # command='cd '+outDir+'/tiff ; makeimageshapefile.py -velocity
-    # ../pieces/inputFile-'+quadNames[0]+'.000 '+outDir+'.sarswathes'
-    # call(command,shell=True,executable='/bin/csh',stderr=stderr,stdout=stdout)
-    # stderr.close()
-    # stdout.close()
-
     return
 
 # ---------------------------------------------------------------------------
@@ -665,11 +760,12 @@ def makeQVRTSs(quadNames, outDir, baseFlags):
     noData = {'.vx': -2.e9, '.vy': -2.0e9, '.v': -1, '.ex': -1, '.ey': -1,
               '.dT': -2.0e9}
     print('Creating vrts....')
-    p, _ = projWin(iceSheetRegion)
+    #p, _ = projWin(iceSheetRegion)
     for suffix in suffixes:
         command = f'cd  {outDir}/tiff ; ' \
-            f'gdalbuildvrt  -te {p["xmin"]}  {p["ymin"]} {p["xmax"]}' \
-            f' {p["ymax"]} -tr {p["dx"]} {p["dy"]} -vrtnodata' \
+            f'gdalbuildvrt -te {myProjWin["xmin"]} {myProjWin["ymin"]} ' \
+            f'{myProjWin["xmax"]} {myProjWin["ymax"]} ' \
+            f'-tr {myProjWin["dx"]} {myProjWin["dy"]} -vrtnodata' \
             f' {noData[suffix]} {outDir+suffix}.vrt *{suffix}.tif'
         print(command)
         call(command, shell=True, executable='/bin/csh')
@@ -763,20 +859,24 @@ def makeLogMap(outDir, quadNames):
     print('Making Log Maps...')
     #
     jpgRes = '500'
+    print('ffff')
+    #myProj, _ = projWin(iceSheetRegion)
+    print(f'makeLogMap {myProjWin}')
     # setup radar shapes
     if not os.path.isdir(outDir+'/preview'):
         os.mkdir(outDir+'/preview')
     u.pushd(outDir+'/preview')
+
     for quadName in quadNames:
         command = f"idl -e \"rsfig,maxv=3000,/nobar,file='../interp/mosaic-" \
             f"{quadName}',geohue='{quadName}.browse.tif'"
-        if iceSheetRegion == 'amundsen':
+        if iceSheetRegion == 'amundsen' or myProjWin['epsg'] == 3031:
             command += ',/south'
         elif iceSheetRegion == 'taku':
             command += ',/taku'
         if 'south' in quadName:
             command += ",labels=[" \
-                "'NASA MEaSUREs GIMP Ice Velocity Map'," \
+                "'NASA MEaSUREs GrIMP Ice Velocity Map'," \
                 "'Produced using one or more of the following:'," \
                 "'Copernicus Sentinel 1 data processed by ESA'," \
                 "'TerraSAR-X/TanDEM-X data processed by DLR'," \
@@ -787,14 +887,15 @@ def makeLogMap(outDir, quadNames):
     # clean up
     if os.path.exists('tmp.tif'):
         os.remove('tmp.tif')
-    p, _ = projWin(iceSheetRegion)
-    epsg = s.defaultRegionDefs(iceSheetRegion).epsg()
+    #p, _ = projWin(iceSheetRegion)
+    epsg = regionDefs.epsg()
     if epsg is not None:
         myProj = f'EPSG:{epsg}'
     else:
-        myProj = s.defaultRegionDefs(iceSheetRegion).wktFile()
-    command = f'gdalbuildvrt -a_srs {myProj} -te {p["xmin"]}  ' \
-        f'{p["ymin"]} {p["xmax"]} {p["ymax"]} -tr {p["dx"]} {p["dy"]} ' \
+        myProj = regionDefs.wktFile()
+    command = f'gdalbuildvrt -a_srs {myProj} -te {myProjWin["xmin"]}  ' \
+        f'{myProjWin["ymin"]} {myProjWin["xmax"]} {myProjWin["ymax"]} ' \
+        f'-tr {myProjWin["dx"]} {myProjWin["dy"]} ' \
         f'-hidenodata -vrtnodata "255 255 255" {outDir}.browse.vrt' \
         f' *.tif'
     call(command, shell=True, executable='/bin/csh')
@@ -860,6 +961,8 @@ def prodType(d1, d2):
 
 def getRegionID():
     regionIDs = {'greenland': 'GL', 'amundsen': 'ASE', 'taku': 'TAKU'}
+    if iceSheetRegionFile is not None:
+        regionIDs['custom'] = readCustomFile(key='regionID')
     try:
         regionID = regionIDs[iceSheetRegion]
     except Exception:
@@ -870,7 +973,7 @@ def getRegionID():
 
 def finalName(vrt):
     ''' Create final name from intermediate vrt name '''
-    regionID = getRegionID()
+    #regionID = getRegionID()
     pieces = vrt.split('.')
     # dates
     d1 = datetime.strptime(pieces[0], 'Vel-%Y-%m-%d')
@@ -913,9 +1016,10 @@ def processFinalVRTs(outDir, releaseDir, cloudOptimize):
             #    '2 4 8 16 32 64 128'
         # old format
         else:
-            p, _ = projWin(iceSheetRegion)
-            pw = f'{p["xmin"]} {p["ymax"]} {p["xmax"]} {p["ymin"]} ' \
-                f'-te {p["dx"]} {p["dy"]}'
+            #p, _ = projWin(iceSheetRegion)
+            pw = f'{myProjWin["xmin"]} {myProjWin["ymax"]} ' \
+                f'{myProjWin["xmax"]} {myProjWin["ymin"]} ' \
+                f'-te {myProjWin["dx"]} {myProjWin["dy"]}'
             command = f'gdal_translate  -co "COMPRESS=LZW" -co "PREDICTOR=1"'\
                 f' -co "TILED=YES" -projwin {pw+vrt} ../release/{pName}'
         print(command)
@@ -967,7 +1071,7 @@ def shapeName(shapeFile):
     d2 = datetime.strptime(pieces[2], '%Y-%m-%d')
     myPrefix = prodType(d1, d2)
     mySuffix = pieces[3]
-    regionID = getRegionID()
+    # regionID = getRegionID()
     currentVersion = currentVersions[myPrefix]
     subVersion = subVersions[myPrefix]
     name = f'{regionID}_vel_mosaic_{myPrefix}_{d1.strftime("%d%b%y")}_' \
@@ -1151,7 +1255,7 @@ def makePremets(preMets, outDir, sTypes):
     suffixes = ['vx']  # [],'vy','vv','ex','ey','dT','browse']
     # generate file name using velocity as template
     preMetFiles = []
-    regionID = getRegionID()
+    # regionID = getRegionID()
     for suffix in suffixes:
         velX = u.dols(f'ls -d {regionID}_vel*{suffix}*.tif')
         if len(velX) == 0:
@@ -1182,15 +1286,15 @@ def makeSpatial(outDir, spatialFile):
     u.pushd(f'{outDir}/release')
     # assume makePremet error check
     fp = open(spatialFile, 'w')
-    _, corners = projWin(iceSheetRegion)
+    #_, corners = projWin(iceSheetRegion)
     # corner points
-    print(f'{corners["ll"]["lon"]:10.5f} {corners["ll"]["lat"]:10.5f}',
+    print(f'{llCorners["ll"]["lon"]:10.5f} {llCorners["ll"]["lat"]:10.5f}',
           file=fp)
-    print(f'{corners["ul"]["lon"]:10.5f} {corners["ul"]["lat"]:10.5f}',
+    print(f'{llCorners["ul"]["lon"]:10.5f} {llCorners["ul"]["lat"]:10.5f}',
           file=fp)
-    print(f'{corners["ur"]["lon"]:10.5f} {corners["ur"]["lat"]:10.5f}',
+    print(f'{llCorners["ur"]["lon"]:10.5f} {llCorners["ur"]["lat"]:10.5f}',
           file=fp)
-    print(f'{corners["lr"]["lon"]:10.5f} {corners["lr"]["lat"]:10.5f}',
+    print(f'{llCorners["lr"]["lon"]:10.5f} {llCorners["lr"]["lat"]:10.5f}',
           file=fp)
     #
     fp.close()
@@ -1223,8 +1327,8 @@ def processQuadrants(quadNames, quadrants, outDir, dateTakes, firstDate,
             outPieces.append(outFileSub)
             # create the input file used to make the mosaic
             if not noReprocess:
-                writeInputFileQ(outDir+'/pieces/'+inFileSub, limit, dateTakes,
-                                firstDate, lastDate, noCull)
+                writeInputFileQ(f'{outDir}/pieces/{inFileSub}', limit,
+                                dateTakes, firstDate, lastDate, noCull)
             # Add submosaic to list of threads
             threads.append(threading.Thread(target=runSubMosaic,
                                             args=[outDir, inFileSub,
@@ -1247,6 +1351,9 @@ def processQuadrants(quadNames, quadrants, outDir, dateTakes, firstDate,
 def main():
     '''Set up mosaic files, makes directories if needed, produces all files,
     and can run with runAll '''
+    global regionDefs
+    global outputMaskTemplate
+    global regionID
     #
     # get command line args
     maxThreads = 16
@@ -1254,12 +1361,22 @@ def main():
     baseFlags, inputFile, lsFile, firstDate, lastDate, noTSX,\
         outputMaskTemplate, shelfMask, noReprocess, cloudOptimize, noCull \
         = processQArg(sys.argv)
-    #
+    # setup global defs
+    regionDefs = s.defaultRegionDefs(iceSheetRegion,
+                                     regionFile=iceSheetRegionFile)
+    projWin(iceSheetRegion)
     if iceSheetRegion == 'amundsen':
         dem = defaultAntarcticDEM
     else:
-        dem = s.defaultRegionDefs(iceSheetRegion).dem()
-    x, y = projWin(iceSheetRegion)
+        dem = regionDefs.dem()
+    regionID = getRegionID()
+    #
+    # Setup template
+    if iceSheetRegionFile is None:
+        outputMaskTemplate = \
+            f'/Users/ian/maskTemplates/{iceSheetRegion}Output.shp'
+    else:
+        outputMaskTemplate = readCustomFile(key='maskTemplate')
     #
     if len(shelfMask) > 1:
         baseFlags += f' -shelfMask {shelfMask}'

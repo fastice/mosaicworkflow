@@ -367,6 +367,7 @@ def mergeImageTiles(prodDir, prefix, date1, date2, posting, corners,
         shapeFileName = prodName.replace('*', 'shape').replace('_RESm', '')
         command = f'makeimageshapefile.py inputFile.0.0 ' \
             f'../release/{shapeFileName}'
+        print(command)
         call(command, shell=True, executable='/bin/csh')
         satTypes = imageSatTypes(f'{shapeFileName}.shp')
         makeImageSpatial(corners, '..', f'{shapeFileName}.spo')

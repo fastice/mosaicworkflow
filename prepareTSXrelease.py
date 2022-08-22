@@ -37,6 +37,8 @@ def setupCleanTSXArgs():
                         help='Do not mask fast tracked areas to keep melange')
     parser.add_argument('--sensor', type=str, default='TSX',
                         choices=['TSX', 'CSK'], help='Sensor name')
+    parser.add_argument('--region', type=str, default='greenland',
+                        choices=['greenland', 'taku'], help='Sensor name')
     parser.add_argument('releaseDir', type=str, nargs=1,
                         help='Name of release dir for this release')
     #
@@ -60,7 +62,7 @@ def setupCleanTSXArgs():
     #
     delivered = readDelivered(args.delivered)
     return args.releaseDir[0], track, firstdate, lastdate, flags, usePrompt, \
-        args.keepFast, delivered, args.sensor
+        args.keepFast, delivered, args.sensor, args.region
 
 
 def getMaskDict(glacierID):
@@ -178,7 +180,7 @@ def computeNominalTimes(offDirsUse):
             h, m, s = meta['Nominal Time for Pair (HH:MM:SS)'].split(':')
             seconds += int(h) * 3600. + int(m) * 60. + int(s)
             count += 1
-        tmpDate = datetime(1, 1, 1)+timedelta(seconds=seconds/count)
+        tmpDate = datetime(1, 1, 1) + timedelta(seconds=seconds/count)
         offDir['nomTime'] = tmpDate.strftime('%H-%M-%S')
 
 
@@ -253,8 +255,13 @@ def getOffsetsToUse(track, firstDate, lastDate, deliveredList, sensor):
     return offDirsUse
 
 
-def getBoxInfo():
-    boxName = u.dols('ls -d *coast-*')[0]
+def getBoxInfo(region):
+    if region == 'greenland':
+        boxName = u.dols('ls -d *coast-*')[0]
+    elif region == 'taku':
+        boxName = u.dols('ls -d Alaska-*')[0]
+    else:
+        u.myerror(f'{region} not valid region')
     resFile = f'{boxName}/resolution'
     if os.path.exists(resFile):
         fp = open(resFile)
@@ -317,15 +324,18 @@ def makeRunOff(outDir, shelfMask, dem):
         u.myerror(f'Problem making runOff in {outDir}')
 
 
-def getDem(offDir, boxName, demDict):
+def getDem(offDir, boxName, demDict, region):
     ''' get dem from dict or return defaull'''
     # dem = '/Volumes/insar3/ian/gimp/gimpdem_90m.270'
     # updated 5/1/2020 to use gimp1 < 2015, ow gimp2
-    if offDir["date1"].year < 2015:
-        dem = '/Volumes/insar7/ian/gimp/gimp1/270m/dem.gimp1.270m'
+    if region == 'greenland':
+        if offDir["date1"].year < 2015:
+            dem = '/Volumes/insar7/ian/gimp/gimp1/270m/dem.gimp1.270m'
+        else:
+            # dem = '/Volumes/insar7/ian/gimp/gimp2/270m/dem.gimp2.270m'
+            dem = s.defaultRegionDefs('greenland').dem()
     else:
-        # dem = '/Volumes/insar7/ian/gimp/gimp2/270m/dem.gimp2.270m'
-        dem = s.defaultRegionDefs('greenland').dem()
+        dem = s.defaultRegionDefs(region).dem()
     # no custom DEM return
     if demDict is None:
         return dem
@@ -386,7 +396,7 @@ def makeJPG(outDir, productDir, velRoot, sensor):
     os.remove(f'{outDir}/stderr.{n}')
 
 
-def writeTiffProduct(productDir, outDir, velRoot, productType, epsg):
+def writeTiffProduct(productDir, outDir, velRoot, productType, epsg, wktFile):
     ''' write velocity or error product '''
     noData = {'velocity': -2.0e9, 'error': -2.0e9}
     suffixDictIn = {'velocity': ['vx', 'vy', 'v'], 'error': ['ex', 'ey']}
@@ -395,6 +405,7 @@ def writeTiffProduct(productDir, outDir, velRoot, productType, epsg):
     myVel.readData(f'{outDir}/mosaicOffsets', epsg=epsg)
     # write with default names
     myVel.writeMyTiff(f'{productDir}/mosaicOffsets', epsg=epsg,
+                      wktFile=wktFile,
                       noDataDefault=noData[productType], predictor=1,
                       noV=False, overviews=[2, 4])
     #
@@ -458,7 +469,7 @@ def makeSpatial(corners, productDir, velRoot):
     fp.close()
 
 
-def runReleaseVel(releaseDir, outDir, offDir, boxName, epsg, sensor):
+def runReleaseVel(releaseDir, outDir, offDir, boxName, epsg, wktFile, sensor):
     ''' this routine is threaded to make the products'''
     # make the products
     makeMosaic3D(outDir)
@@ -466,8 +477,9 @@ def runReleaseVel(releaseDir, outDir, offDir, boxName, epsg, sensor):
     productDir, velRoot = makeFinalProductDir(releaseDir, offDir, boxName,
                                               sensor)
     # write the tiff files
-    cornersV = writeTiffProduct(productDir, outDir, velRoot, 'velocity', epsg)
-    _ = writeTiffProduct(productDir, outDir, velRoot, 'error', epsg)
+    cornersV = writeTiffProduct(productDir, outDir, velRoot, 'velocity', epsg,
+                                wktFile)
+    _ = writeTiffProduct(productDir, outDir, velRoot, 'error', epsg, wktFile)
     #
     shutil.copy(f'{outDir}/mosaicOffsets.meta',
                 f'{productDir}/'
@@ -480,9 +492,11 @@ def runReleaseVel(releaseDir, outDir, offDir, boxName, epsg, sensor):
     makeSpatial(cornersV, productDir, velRoot)
 
 
-def shelfMaskName(myDate, maskDict, glacierID, keepFast):
+def shelfMaskName(myDate, maskDict, glacierID, keepFast, region):
     ''' get the mask name '''
     #
+    if region != 'greenland':
+        return s.defaultRegionDefs(region).mask()
     if keepFast:
         return '/Users/ian/greenlandmask/MelangeMask/melangemask'
     doy = myDate.timetuple().tm_yday
@@ -529,7 +543,8 @@ def shelfMaskName(myDate, maskDict, glacierID, keepFast):
 
 
 def setupProductGen(releaseDir, offDirsUse, boxName, resolution, firstDate,
-                    lastDate, epsg, maskDict, glacierID, keepFast, sensor):
+                    lastDate, epsg, wktFile, maskDict, glacierID, keepFast,
+                    sensor, region):
     ''' set up mosaicker '''
     threads = []
     demDict = getDemDict(boxName)
@@ -544,27 +559,27 @@ def setupProductGen(releaseDir, offDirsUse, boxName, resolution, firstDate,
         mkInputFile(offDir, outDir, resolution, myInputs)
         #
         shelfMask = shelfMaskName(offDir["date1"], maskDict, glacierID,
-                                  keepFast)
+                                  keepFast, region)
         #
-        dem = getDem(offDir, boxName, demDict)
+        dem = getDem(offDir, boxName, demDict, region)
         # make the runOff
         makeRunOff(outDir, shelfMask, dem)
         #
         threads.append(threading.Thread(target=runReleaseVel,
                                         args=[releaseDir, outDir, offDir,
-                                              boxName, epsg, sensor]))
+                                              boxName, epsg, wktFile, sensor]))
     return threads
 
 
 def main():
     # assume for now this greenland only
-    epsg = 3413
+    # epsg = 3413
     # get args
     releaseDir, track, firstDate, lastDate, flags, usePrompt, keepFast, \
-        delivered, sensor = setupCleanTSXArgs()
+        delivered, sensor, region = setupCleanTSXArgs()
     print(f'track {track} firstdate {firstDate} lastdate {lastDate}')
     #
-    boxName, resolution, glacierID = getBoxInfo()
+    boxName, resolution, glacierID = getBoxInfo(region)
     maskDict = getMaskDict(glacierID)
     prepReleaseDir(releaseDir, boxName)
     print(f'Box {boxName} with resolution {resolution}')
@@ -576,9 +591,11 @@ def main():
                                  sensor)
     # print(deliveredList)
     # setup the product threads
+    epsg = s.defaultRegionDefs(region).epsg()
+    wktFile = s.defaultRegionDefs(region).wktFile()
     velThreads = setupProductGen(releaseDir, offDirsUse, boxName, resolution,
-                                 firstDate, lastDate, epsg, maskDict,
-                                 glacierID, keepFast, sensor)
+                                 firstDate, lastDate, epsg, wktFile, maskDict,
+                                 glacierID, keepFast, sensor, region)
     # exit()
     # run threads
     u.runMyThreads(velThreads, 12, 'Release Vel', delay=0, prompt=usePrompt)
