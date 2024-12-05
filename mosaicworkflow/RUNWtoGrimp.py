@@ -362,4 +362,6 @@ def main():
                 stdout=params['stdout'], workingDir=workingDir)
 
 
-main()
+if __name__ == "__main__":
+    main()
+

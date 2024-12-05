@@ -263,4 +263,5 @@ def main():
     print(myProds)
 
 
-main()
+if __name__ == "__main__":
+    main()

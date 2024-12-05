@@ -343,4 +343,6 @@ def main():
         currentLastDate, year = findLastDate(currentFirstDate, myArgs)
 
 
-main()
+if __name__ == "__main__":
+    main()
+

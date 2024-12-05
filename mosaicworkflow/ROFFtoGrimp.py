@@ -858,4 +858,6 @@ def main():
     # writeVRTsRD(myROFF, ROFFPath, params)
 
 
-main()
+if __name__ == "__main__":
+    main()
+

@@ -546,4 +546,5 @@ def main():
         makeImageSpatial(corners, prodDir, preMetFile.replace('premet', 'spo'))
 
 
-main()
+if __name__ == "__main__":
+    main()

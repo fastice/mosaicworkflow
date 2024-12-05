@@ -1342,5 +1342,5 @@ def main():
             print(preMetFile)
             makeSpatial(outDir, preMetFile.replace('premet', 'spo'), template)
 
-
-main()
+if __name__ == "__main__":
+    main()

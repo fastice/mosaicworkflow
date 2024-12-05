@@ -608,4 +608,6 @@ def main():
     u.runMyThreads(velThreads, 12, 'Release Vel', delay=0, prompt=usePrompt)
 
 
-main()
+if __name__ == "__main__":
+    main()
+

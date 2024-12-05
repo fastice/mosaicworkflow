@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mosaicworkflow"
+version = "0.0.1"
+description = "Greenland Ice Mapping Project (GrIMP) workflow programs"
+authors = [
+    { name = "Ian Joughin", email = "irj@uw.edu" }
+]
+license = { text = "MIT" }
+readme = "README.md"
+keywords = ["SAR", "NISAR"]
+requires-python = ">=3.8"
+
+[tool.setuptools]
+packages = ["mosaicworkflow"]
+
+[project.urls]
+Homepage = "https://github.com/fastice/mosaicworkflow"
+Repository = "https://github.com/fastice/mosaicworkflow"
+
+[project.scripts]
+makeimagemosaics = "mosaicworkflow.makeimagemosaics:main"
+makemosaic = "mosaicworkflow.makemosaic:main"
+prepareTSXrelease = "mosaicworkflow.prepareTSXrelease:main"
+ROFFtoGrimp = "mosaicworkflow.ROFFtoGrimp:main"
+RUNWtoGrimp = "mosaicworkflow.RUNWtoGrimp:main"
+setupimagemosaic = "mosaicworkflow.setupimagemosaic:main"
+setupquarters = "mosaicworkflow.setupquarters:main"
+
