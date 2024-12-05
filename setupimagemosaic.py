@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
 Created on Tue Apr  7 13:42:20 2020
@@ -269,7 +269,7 @@ def populateImagePremet(preMetData, firstDate, lastDate, validPlatforms={},
     #
     sensorShort = {'S1A': 'C-SAR', 'S1B': 'C-SAR'}
     instShort = {'S1A': 'C-SAR', 'S1B': 'C-SAR'}
-    instrument = {'S1A': 'SENTINEL-1A', 'S1B': 'SENTINEL-1B'}
+    instrument = {'S1A': 'Sentinel-1A', 'S1B': 'Sentinel-1B'}
     #
     sensor = ''
     for platform in validPlatforms.keys():
@@ -278,7 +278,9 @@ def populateImagePremet(preMetData, firstDate, lastDate, validPlatforms={},
                           'AssociatedInstrumentShortname': instShort[platform],
                           'AssociatedSensorShortname': sensorShort[platform]}
             sensor += platform + ' '
-            preMetData.append(s.premet(myPlatform, container='Platforms'))
+            preMetData.append(
+                s.premet(myPlatform,
+                         container='AssociatedPlatformInstrumentSensor'))
     #
     dataSetID = {'DataSetId': 'MEaSUREs Greenland '
                  f'{prodType} image mosaics from {sensor.strip()}'}
@@ -473,6 +475,11 @@ def checkDateRange(myArgs, sarDB):
         True if in range, False if not
 
     '''
+    print(type(myArgs['firstDate']),  type(sarDB.minDate))
+    print(myArgs['firstDate'],  sarDB.minDate )
+    print(myArgs['lastDate'], sarDB.maxDate)
+    print(myArgs['firstDate'] >= sarDB.minDate )
+    print(myArgs['lastDate'] <= sarDB.maxDate)
     return myArgs['firstDate'] >= sarDB.minDate and \
         myArgs['lastDate'] <= sarDB.maxDate
 
@@ -489,6 +496,7 @@ def main():
     ''' Create an image mosaic '''
     # get args
     myArgs = setupImageMosaicArgs()
+    print(myArgs)
     #
     checkGdalVersion()
     #
@@ -503,7 +511,7 @@ def main():
     # create single dict by date of products across multiple dbs with paths
     dateRangeAll = myDB.extractByDateRange(myArgs['firstDate'],
                                            myArgs['lastDate'])
-  
+
     dateRangeTracks = dateRangeAll.selectTrackDateRangeDB(myArgs['tracks'])
     #
     prodDir = setupMosaicDir(myArgs['firstDate'], myArgs['lastDate'],

@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 import utilities as u
-import sys
 import os
+import geopandas as gpd
 import sarfunc as s
 from subprocess import call
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import numpy as np
 import threading
-import pyproj
-import shutil
 import shapefile
-import yaml
-
+import shutil
+import glob
+import argparse
+import mosaicfunc as mosf
+from matplotlib import colors
+from osgeo import gdal, osr
+from PIL import Image
+from PIL import ImageFont
+from PIL import ImageDraw
+import gc
 # Currently this is hardwired here since this program only works for greenland.
 # It could be used for future expansion to Antarctica I have tried to use it to
 # flag ice sheet specific stuff
@@ -19,254 +25,171 @@ import yaml
 iceSheetRegion = 'greenland'
 iceSheetRegionFile = None
 myProjWin = None
-llCorners = None
+
 regionDefs = None
 outputMaskTemplate = None
 regionID = None
 
-currentVersions = {'s1cycle': 2, 'Monthly': 4, 'Quarterly': 4, 'Annual': 4,
-                   'multiYear': 1}
+currentVersions = {'s1cycle': 2, 's1-12day': 2, 'Monthly': 5, 'Quarterly': 5,
+                   'Annual': 5, 'multiYear': 1}
 subVersions = {'s1cycle': 0, 'Monthly': 0, 'Quarterly': 0, 'Annual': 0,
                'multiYear': 0}
-defaultGreenlandDEM = s.defaultRegionDefs('greenland').dem()
-defaultAntarcticDEM = '/Volumes/insar7/ian/TSXsouth/PIG/DEM/SentinelPigDEM'
 
 
-def usageQ():
-    #
-    print('\n\t\t\t\t \033[1;34m SETUP QUADRANT MOSAICS \033[0m')
-    print('\n'+'\033[1m'+'Use a template inputFile to create a mosaic made of'
-          ' four quadrants for a specified date range')
-    print("\n\trunquarters.py -timeOverlapOff  -noReprocess "
-          "-baseFlags='-flag1...' -input=inputFile ")
-    print("\t-shelfMask=shelfMask -ouputMask=outputMask.shp -lsFile=lsFile "
-          "-firstdate=YYYY-MM-DD -lastdate=YYYY-MM-DD -noTSX\n ")
-    print('where:\n')
-    print('\t -dem\t\t\tis the full path to the DEM file '
-          f'[{defaultGreenlandDEM}]')
-    print('\t -baseFlags\t\tmosaic3d flags that are applied to all cases'
-          ' [-offsets -rOffsets -fl 10 -noVh -3dOff]')
-    print('\t -inputFile\t\tinputFile with all tracks to be considered '
-          '[track-all/inputFile]')
-    print('\t -lsFile\t\tfile with all the landsat  tracks to be considered '
-          '[none]')
-    print('\t -firstdate\t\tfirst date  of image in mosiac (required)')
-    print('\t -lastdate\t\tlast date of image in mosaic (required)')
-    print('\t -timeOverlapOff\tBy default timeOverlap called with mosaic3d '
-          '- use flag to turn off [On]')
-    print('\t -noReprocess\t\tRebuild tiffs with existing mosaic3d '
-          'output [Off]')
-    print('\t -noCull\t\tUse unculled offsets [Off]')
-    print('\t -noTSX\t\t\texclude TSX files [include TSX]')
-    print('\t -amundsen\t\tamundsen map [greenland]')
-    print('\t -greenland\t\tgreenland map [greenland]')
-    print('\t -shelfMask\t\tMask to pass to mosaic3d (byte mask)')
-    print('\t -outputMask\t\tMask to apply to ouput to remove bad areas '
-          '(shape file with regions to mask)')
-    print('\nNotes:\n')
-    print('\033[0m')
-    sys.exit()
-
-# -----------------------------------------------------------------------------
-# Process command line args.
-# -----------------------------------------------------------------------------
-
-
-def processQArg(argv):
-    # Setup defaults
-    baseFlags = '-offsets -rOffsets -fl 10 -noVh -3dOff'
-    inputFile = 'track-all/inputFile'
-    lsFile = None
-    noTSX = False
-    firstDate = ' '
-    lastDate = ' '
-    outputMaskTemplate = None
-    shelfMask = ''
-    timeOverlapOff = False
-    noReprocess = False
-    noCull = False
-    helpFlag = False
-    customRegion = None
-    # for now this is not an option, but allows for a change later
-    cloudOptimize = True
-    print('\n')
-    global iceSheetRegion
-    global iceSheetRegionFile
-    try:
-        for myStr in argv[1:]:
-            print(myStr)
-            if '-help' in myStr:
-                helpFlag = True
-                usageQ()
-            elif '-noTSX' in myStr:
-                noTSX = True
-            elif '-baseFlags' in myStr:
-                temp = myStr.split('=')[1:]
-                baseFlags = ' '.join(temp)
-                print('base flags', baseFlags)
-            elif '-input' in myStr:
-                inputFile = myStr.split('=')[-1]
-                print('inputFile = ', inputFile)
-            elif '-lsFile' in myStr:
-                lsFile = myStr.split('=')[-1]
-                print('lsFile = ', lsFile)
-            elif '-firstdate' in myStr:
-                firstDate = datetime.strptime(myStr.split('=')[-1], '%Y-%m-%d')
-                print('First Date = ', firstDate)
-            elif '-lastdate' in myStr:
-                lastDate = datetime.strptime(myStr.split('=')[-1], '%Y-%m-%d')
-                lastDate += timedelta(seconds=86400-1)
-                print('Last Date = ', lastDate)
-            elif '-shelfMask' in myStr:
-                shelfMask = myStr.split('=')[-1]
-                print('shelfMask = ', shelfMask)
-            elif '-outputMask' in myStr:
-                outputMaskTemplate = myStr.split('=')[-1]
-                print('outputMask = ',  outputMaskTemplate)
-            elif '-timeOverlapOff' in myStr:
-                timeOverlapOff = True
-                print('timeOverlapOff = ', timeOverlapOff)
-            elif '-noReprocess' in myStr:
-                noReprocess = True
-                print('noReprocess = ', noReprocess)
-            elif '-noCull' in myStr:
-                noCull = True
-                print('noCull = ', noCull)
-            elif '-customRegion' in myStr:
-                iceSheetRegionFile = myStr.split('=')[-1]
-                iceSheetRegion = 'custom'
-                print('customRegion = ', customRegion)
-            elif '-amundsen' in myStr:
-                iceSheetRegion = 'amundsen'
-            elif '-greenland' in myStr:
-                iceSheetRegion = 'greenland'
-            elif '-taku' in myStr:
-                iceSheetRegion = 'taku'
+def processTemplate(args):
+    '''
+    Merge template inputs with commandline overrides.
+    '''
+    # Read template
+    template = mosf.readVelocityTemplate(args.template)
+    template['template'] = args.template
+    # Command line will override dem
+    for key in ['dem', 'lsFile', 'baseFlags', 'outputMask', 'mosaicMask',
+                'inputFile']:
+        try:
+            # Override template if passed at command line
+            # print(key, args)
+            if key not in template:
+                template[key] = None  # Aovid print fail, reset below
+            if getattr(args, key) is not None:
+                print(f'Overriding template {key} value of {template[key]}'
+                      f'command line value {getattr(args, key)}')
+                template[key] = getattr(args, key)
             else:
-                print(f'problem with {myStr} ')
-                usageQ()
-        if not timeOverlapOff:
-            baseFlags += ' -timeOverlap '
-        print('baseFlags = ', baseFlags)
-        if type(firstDate) is str or type(lastDate) is str:
-            u.myerror('no first and/or last date specficied')
+                if key not in template:
+                    template[key] = None
+        except Exception:
+            u.mywarning(f'processTemplate: invalid key {key}')
         #
-        print(iceSheetRegion, iceSheetRegionFile)
-        if helpFlag:
-            usageQ()
-        return baseFlags, inputFile, lsFile, firstDate, lastDate, noTSX,\
-            outputMaskTemplate, shelfMask, noReprocess, cloudOptimize, noCull
-    except Exception:
-        print(myStr)
-        usageQ()
+    # Check all other essential keys found
+    for key in ['xll', 'yll', 'sx', 'sy', 'dx', 'dy', 'regionID', 'dem']:
+        if key not in template:
+            u.myerror(f'Missing parameter {key} in both template and command')
+    #
+    # Compute corners
+    for c in ['x', 'y']:
+        template[f'{c}min'] = template[f'{c}ll'] - template[f'd{c}'] * 0.5
+        template[f'{c}max'] = template[f'{c}min'] + \
+            template[f's{c}'] * template[f'd{c}']
+    #
+    if 'wktFile' in template and 'epsg' not in template:
+        template['epsg'] = None
+    return template
 
-# ----------------------------------------------------------------------------
-# define output windows for each projection -
-# ----------------------------------------------------------------------------
+
+def processFlags(args, template):
+    '''
+    Create dictionary with relevant flags
+    '''
+    flags = {}
+    # Dates
+    for flag in ['firstdate', 'lastdate', 'noTSX', 'noCull', 'check',
+                 'timeOverlapOff', 'noReprocess']:
+        if flag in args:
+            flags[flag] = getattr(args, flag)
+        else:
+            u.mywarning(f'processFlags: missing value for value {flag}')
+    #
+    try:
+        flags['firstdate'] = datetime.strptime(flags['firstdate'], '%Y-%m-%d')
+        flags['lastdate'] = datetime.strptime(flags['lastdate'], '%Y-%m-%d')
+    except Exception:
+        u.myerror('Could not process one or both dates '
+                  f'{flags["firstdate"]} {flags["lastdate"]}')
+    if template['baseFlags'] is None:
+        u.myerror('processFlags: baseFlags not specified.')
+    elif not flags['timeOverlapOff']:
+        template['baseFlags'] += ' -timeOverlap '
+    return flags
+
+
+def extractRegion(template):
+    '''
+    Extract info to define regions
+    '''
+    region = {}
+
+    for key in ['epsg', 'wktFile', 'dem', 'velMap', 'sigmaShape']:
+        if key in template:
+            region[key] = template[key]
+        else:
+            region[key] = None
+            # Can miss epsg is if wktfile
+            if not (key == 'epsg' and 'wktFile' in template):
+                u.mywarning(f'Region def missing {key}')
+    return region
+
+
+def processQArgs():
+    ''' Handle command line args'''
+    parser = argparse.ArgumentParser(
+        description='\033[1;34m Setup individual velocity mosaics \033[0m',
+        epilog='Notes:  ', allow_abbrev='False')
+    # flag
+    parser.add_argument('--firstdate', type=str, default='2015-01-01',
+                        help='First date for series of mosaics. '
+                        'Use central dates >= first date [2015-01-01]')
+    defaultEnd = date.today().strftime('%Y-%m-%d')
+    # flag
+    parser.add_argument('--lastdate', type=str, default=defaultEnd,
+                        help='Last date for series of mosaics. '
+                        'Use central dates <= lastdate [defaultDend]')
+    #
+    parser.add_argument('--noReprocess', action='store_true', default=False,
+                        help='Just reformat data')
+    # flag
+    parser.add_argument('--noTSX', action='store_true', default=False,
+                        help='Exclude TSX/CSK data')
+    # flag
+    parser.add_argument('--noCull', action='store_true', default=False,
+                        help='Use unculled offsets')
+    # flag
+    parser.add_argument('-timeOverlapOff', action='store_true', default=False,
+                        help='Set to turn timeOverlap off')
+    # template
+    parser.add_argument('--baseFlags', type=None,
+                        default=None,
+                        help='Override default flags for the mosaicker')
+    # template
+    parser.add_argument('--outputMask', type=str, default=None,
+                        help='Shape mask for final output (shp)')
+    parser.add_argument('--mosaicMask', type=str, default=None,
+                        help='Mask passed to mosaic3d (shelfMask)')
+    # flag
+    parser.add_argument('--check', action='store_true', default=False,
+                        help='Setup command,  check masks, but do not run')
+    parser.add_argument('--dem', type=str, default=None,
+                        help='Override dem from template')
+    # template
+    parser.add_argument('--inputFile', type=str, default=None,
+                        help='Input file with SAR inputs')
+    # template
+    parser.add_argument('--lsFile', type=str, default=None,
+                        help='Landsat input file for mosaic period')
+    parser.add_argument('--template', type=str, default='mosaic.template.yaml',
+                        help='template that defines mosaic')
+    #
+    args = parser.parse_args()
+    template = processTemplate(args)
+    flags = processFlags(args, template)
+    #
+    if template['mosaicMask'] is not None:
+        template['baseFlags'] += f' -shelfMask {template["mosaicMask"]}'
+    #
+    if 'regionFile' in template:
+        regionDefs = s.defaultRegionDefs(None,
+                                         regionFile=template['regionFile'])
+    else:
+        region = extractRegion(template)
+        regionDefs = s.defaultRegionDefs(None, regionDef=region)
+    #
+    return template, flags, regionDefs
 
 
 def readWKT(wktFile):
     ''' get wkt from a file '''
     with open(wktFile, 'r') as fp:
         return fp.readline()
-
-def readCustomFile(key=None):
-    try:
-        with open(iceSheetRegionFile) as fp:
-            result = yaml.load(fp, Loader=yaml.FullLoader)
-            print(result)
-            if key is None:
-                return result
-            else:
-                return result[key]
-    except Exception:
-        u.myerror(f'readCustomFile: {iceSheetRegionFile} with {key} '
-                  'could not be parsed')
-
-
-def projWin(region):
-    global myProjWin
-    global llCorners
-    # add other regions here
-    wktFile = regionDefs.wktFile()
-    if iceSheetRegion != 'custom':
-        if wktFile is not None:
-            epsg = None
-            projStr = readWKT(wktFile)
-        else:
-            epsg = regionDefs.epsg()
-            projStr = f'EPSG:{epsg}'
-        projDict = {'greenland': {'xmin': -659100.0, 'xmax': 857900.0,
-                                  'ymin': -3379100.0, 'ymax': -639100.0,
-                                  'dx': 200, 'dy': 200, 'epsg': epsg,
-                                  'proj': projStr},
-                    'amundsen': {'xmin': -2000125.0, 'xmax': -1020125.0,
-                                 'ymin': -1250125.0, 'ymax': 289875.0,
-                                 'dx': 250, 'dy': 250, 'epsg': epsg,
-                                 'proj': projStr},
-                    'taku': {'xmin': -147100.0, 'xmax': 163900.,
-                             'ymin': -3431100.0, 'ymax': -3208100.0,
-                             'dx': 200, 'dy': 200, 'epsg': epsg, 'proj': projStr},
-                    'amundsenOld': {'xmin': -1904125.0, 'xmax': -1084125.0,
-                                    'ymin': -1200125.0, 'ymax': 199875.0,
-                                    'dx': 250, 'dy': 250, 'epsg': epsg,
-                                    'proj': projStr}}
-    else:
-        projDict = {}
-        projDict['custom'] = readCustomFile('projDict')
-        regionDef = readCustomFile('regionDef')
-        if regionDef['wktFile'] is not None:
-            projStr = readWKT(regionDef['wktFile'])
-            projDict['proj'] = projStr
-    # use try to avoid invalid regions
-    try:
-        myProjWin = projDict[region]
-    except Exception:
-        u.myerror(f'invalid region={region} in projWin ')
-    # compute Corners
-    # llproj = pyproj.Proj('+init=EPSG:4326')
-    # xyproj = pyproj.Proj(f'+init=EPSG:{myProj["epsg"]}')
-    xyllXform = pyproj.Transformer.from_crs(projStr, 'epsg:4326')
-    latll, lonll = xyllXform.transform(myProjWin['xmin'], myProjWin['ymin'])
-    latur, lonur = xyllXform.transform(myProjWin['xmax'], myProjWin['ymax'])
-    latlr, lonlr = xyllXform.transform(myProjWin['xmax'], myProjWin['ymin'])
-    latul, lonul = xyllXform.transform(myProjWin['xmin'], myProjWin['ymax'])
-    llCorners = {'ll': {'lat': latll, 'lon': lonll},
-                 'lr': {'lat': latlr, 'lon': lonlr},
-                 'ur': {'lat': latur, 'lon': lonur},
-                 'ul': {'lat': latul, 'lon': lonul}}
-    print(llCorners)
-    # 'amundsen': ' -1904125.0 199875.0 -1084125.0 -1000125.0  -tr 250 250 ' }
-
-
-# -----------------------------------------------------------------------------
-# set up predefined quadrants
-# -----------------------------------------------------------------------------
-
-
-def setupQuadrants():
-    ''' For now hardwire regions as a dictonary '''
-    if iceSheetRegion == 'greenland':
-        names = ['north', 'northeast', 'northwest', 'south']
-        quadrants = {'north': [-626., -1320., 1235., 625.0, .2, .2],
-                     'northeast': [110., -2466., 740., 1146., .2, .2],
-                     'northwest': [-626., -2466., 736., 1146., .2, .2],
-                     'south': [-410., -3356., 915., 890., .2, .2]}
-    #elif iceSheetRegion == 'amundsen':
-    #    names = ['amundsen']
-    #    quadrants = {'amundsen': [-2000, -1250, 980, 1540, 0.25, 0.25]}
-    elif iceSheetRegion != 'greenland':
-        names = [iceSheetRegion]
-        #myProj, _ = projWin(iceSheetRegion)
-        x0 = (myProjWin['xmin'] + myProjWin['dx']*0.5)/1000.
-        y0 = (myProjWin['ymin'] + myProjWin['dy']*0.5)/1000.
-        sx = (myProjWin['xmax'] - myProjWin['xmin'])/1000.
-        sy = (myProjWin['ymax'] - myProjWin['ymin'])/1000.
-        quadrants = {names[0]: [x0, y0, sx, sy, myProjWin['dx']/1000.,
-                              myProjWin['dy']/1000.]}
-    else:
-        u.myerror('Other regions not yet implemented '+iceSheetRegion)
-    return names, quadrants
 
 # -----------------------------------------------------------------------------
 # Read in input file, save as list with [date, line] entries.
@@ -277,8 +200,9 @@ def processInputFileQ(filename, noTSX):
     try:
         inputFile = open(filename, 'r')
     except Exception:
-        u.myerror('could not open SAR input file: '+filename)
+        u.myerror(f'could not open SAR input file: {filename}')
     dataTakes = []
+    count = 0
     for line in inputFile:
         # use line length to skip over non data stuff
         if ';' not in line and len(line) > 80:
@@ -292,71 +216,22 @@ def processInputFileQ(filename, noTSX):
             geo = parts[1].strip()
             exclude = "/".join(geo.split('/')[0:-2])+'/Exclude'
             if not os.path.exists(exclude):
-                fgeo = open(geo, 'r')
-                # read geodat to extract date
-                for gline in fgeo:
-                    if 'Image date' in gline:
-                        gline = gline.split(':')[1]
-                        gline = gline.strip('\n').replace(' ', '')
-                        mydate = datetime.strptime(gline, '%d%b%Y')
-                        break
-                fgeo.close()
+                with open(geo, 'r') as fgeo:
+                    # read geodat to extract date
+                    for gline in fgeo:
+                        if 'Image date' in gline:
+                            gline = gline.split(':')[1]
+                            gline = gline.strip('\n').replace(' ', '')
+                            mydate = datetime.strptime(gline, '%d%b%Y')
+                            break
+                count += 1
+                if count % 500 == 0:
+                    print('.', end='')
                 line += ' '+crossFlag
                 dataTakes.append([mydate, line])
     inputFile.close()
     return dataTakes
 
-# -----------------------------------------------------------------------------
-# For a given overalll mosaics limits, break into sub regions.
-# -----------------------------------------------------------------------------
-
-
-def findLimitsQ(limits):
-    if limits[4] != limits[5]:
-        u.myerror(' X and Y resolutions differ:', limits)
-    resolution = limits[4]
-    #
-    sX = int(limits[2]/resolution)
-    sY = int(limits[3]/resolution)
-    dxkm = resolution
-    dykm = resolution
-    y0orig = limits[1]
-    x0 = limits[0]
-    gd = u.geodat(x0, y0orig, sX, sY, resolution*1000, resolution*1000,
-                  verbose=False)
-    # maximum number of points in a file
-    maxPoints = 7000000
-    if iceSheetRegion == 'amundsen':
-        maxPoints = int(maxPoints/4)
-    # this will force more boxes for 0.5 km and greater to run faster
-    if resolution > 0.49:
-        maxPoints = maxPoints/4
-    # force it to give integer size
-    maxLines = int(maxPoints/sX)
-    # iteration to adjust size so last case is not too small (>.25)
-    done = False
-    while not done:
-        frac = float(sY)/maxLines - int(sY/maxLines)
-        if frac > 0.25:
-            done = True
-        else:
-            maxLines -= 100
-    line = 0
-    lastline = 0
-    limits = []
-    while line < sY:
-        deltaLines = int(min(sY-line, maxLines))
-        line += deltaLines
-        y0 = y0orig+lastline*dykm
-        lastline = line
-        limits.append([x0, y0, sX*dxkm, deltaLines*dykm, dxkm, dykm])
-    #
-    return limits, gd
-
-#
-# -----------------------------------------------------------------------------
-# Write an input file filtered for date range.
-# ----------------------------------------------------------------------------
 
 def computeTSXSeasonCount(dataTakes, date1, date2):
     ''' Count number of TSX summer scenes for each glacier in the year
@@ -400,14 +275,16 @@ def setLineWeight(dataTake, seasonCount):
     # print(newLine)
     return newLine
 
-def writeInputFileQ(infile, limit, dataTakes, date1, date2, noCull):
+
+def writeInputFileQ(infile, xdim, ydim, dataTakes, flags):
     #
     fOut = open(infile, 'w')
     print('; automatically generated input file from setupannual mosaics-- ',
           file=fOut)
     # print limit
-    print('{:.4f} {:.4f} {:.4f} {:.4f} {:.4f} {:.4f}'.format(*limit),
-          file=fOut)
+    # print('{:.4f} {:.4f} {:.4f} {:.4f} {:.4f} {:.4f}'.format(*limit),
+    #      file=fOut)
+    mosf.writeInputHeader(xdim, ydim, fp=fOut)
     # first pass through to filter by date, and get count
     n = 0
     newList = []
@@ -418,24 +295,29 @@ def writeInputFileQ(infile, limit, dataTakes, date1, date2, noCull):
     # the win) this is the first test to determine whether to apply screening
     screenTSX = False
     # don't screen summer months since there should be multiple TSX then
-    if date1.month not in [6, 7, 8] or date2.month not in [7, 8, 9]:
+    if flags['firstdate'].month not in [6, 7, 8] or \
+            flags['lastdate'].month not in [7, 8, 9]:
         # if more than a 15 day estimate, apply screen
-        if (date2-date1).days > 15:
+        if (flags['lastdate'] - flags['firstdate']).days > 15:
             screenTSX = True
-            print(screenTSX)
-    productType = prodType(date1, date2)
+            # print(screenTSX)
+    productType = prodType(flags['firstdate'], flags['lastdate'])
     #
 
     # now loop through data takes, keeping ones in range
     if productType == 'Annual':
-        TSXSeasonCount = computeTSXSeasonCount(dataTakes, date1, date2)
+        TSXSeasonCount = computeTSXSeasonCount(dataTakes,
+                                               flags['firstdate'],
+                                               flags['lastdate'])
     #
+
     for dataTake in dataTakes:
         firstDate = dataTake[0]
         tmp = dataTake[1].split()
         phaseFile = tmp[0]
         secondDate = firstDate + timedelta(float(tmp[3]))
         midDate = firstDate + timedelta(float(tmp[3])) * 0.5
+        #
         # Reduce weight of TSX summer frame so large number of frames does not
         # skew results in annual average.
         if 'TSX' in dataTake[1] and productType == 'Annual':
@@ -443,11 +325,17 @@ def writeInputFileQ(infile, limit, dataTakes, date1, date2, noCull):
         #
         # if this a TSX case and screenTSX on
         # Added only images with center for 6/12 day pairs.
-        if ('TSX' in dataTake[1] and screenTSX) or productType == 's1cycle':
-            # then check midDate in the range, otherwise
-            # Fixed 6/7/22 - replaced <= date1 with < date1
-            # use continue to skip this iteration
-            if midDate < date1 or midDate >= date2:
+        # Not sure what the data range is different, might have to do with
+        # .5 dT non integer.
+        if ('TSX' in dataTake[1] and screenTSX):
+            if midDate < flags['firstdate'] or midDate >= flags['lastdate']:
+                continue
+        # then check midDate in the range, otherwise
+        # Fixed 6/7/22 - replaced <= date1 with < date1
+        # use continue to skip this iteration
+        # Fixed 2/7/24 (changed >= to >)
+        if productType == 's1cycle':
+            if midDate < flags['firstdate'] or midDate > flags['lastdate']:
                 continue
         # This is setup to pass phase data from Oct/year-1 to March/year+1
         # As such, it will provide roughly symmetrical annual average.
@@ -458,8 +346,9 @@ def writeInputFileQ(infile, limit, dataTakes, date1, date2, noCull):
         else:
             dT1, dT2 = timedelta(0), timedelta(0)
         # pass dates with any amount of overlap
-        if secondDate >= (date1+dT1) and firstDate <= (date2+dT2):
-            if noCull:
+        if secondDate >= (flags['firstdate'] + dT1) and \
+                firstDate <= (flags['lastdate'] + dT2):
+            if flags['noCull']:
                 new = changeToNoCull(dataTake[1])
             else:
                 new = [dataTake[1]]
@@ -478,9 +367,9 @@ def writeInputFileQ(infile, limit, dataTakes, date1, date2, noCull):
 
 def changeToNoCull(line):
     mainDir = os.path.dirname(line.split()[1])
-    az = u.dols(f'ls {mainDir}/*.interp.da')[0]
+    az = sorted(glob.glob(f'{mainDir}/*.interp.da'))[0]
     azname = os.path.basename(az)
-    rg = u.dols(f'ls {mainDir}/*.interp.dr')[0]
+    rg = sorted(glob.glob(f'{mainDir}/*.interp.dr'))[0]
     rgname = os.path.basename(rg)
     dataTakeSlow = line.replace('azimuth.offsets', azname)
     dataTakeSlow = dataTakeSlow.replace('range.offsets', rgname)
@@ -493,124 +382,66 @@ def changeToNoCull(line):
                                             'fast/range.offsets.fast')
         new.append(dataTakeFast)
     return new
-# ----------------------------------------------------------------------------
-# run sub mosaics (called as a thread)
-# ----------------------------------------------------------------------------
 
 
-def runSubMosaic(outPath, inputFileName, outFileName, baseFlags, firstDate,
-                 lastDate, lsFile, dem, stdout, stderr):
+def maskMosaic(pieceName, pieceGeodat, outDir, outputMaskShape,
+               baseFlags):
     #
-    # open outputs and check
-    try:
-        #
-        productType = prodType(firstDate, lastDate)
-        firstDateAdjusted, lastDateAdjusted = firstDate, lastDate
-        # This expands limits so the phase data can included.
-        # Offsets data should be filtered through the input.
-        if productType == 'Annual':
-            firstDateAdjusted = firstDateAdjusted + timedelta(-61)
-            lastDateAdjusted = lastDateAdjusted + timedelta(121)
-        # run cull command if doCull set (otherwise only apply coverage
-        flags = baseFlags + ' -date1 ' + firstDateAdjusted.strftime('%m-%d-%Y')
-        flags += ' -date2 ' + lastDateAdjusted.strftime('%m-%d-%Y')
-        if lsFile is not None:
-            flags += ' -landSat '+lsFile
-        command = f'cd {outPath}; mosaic3d -writeBlank -center {flags} ' \
-            f'pieces/{inputFileName} {dem} pieces/{outFileName}'
-        print(command)
-        print(command, file=stdout)
-        call(command, shell=True, executable='/bin/csh', stdout=stdout,
-             stderr=stderr)
-    except Exception:
-        # if missing files, reject to the NoResult directory
-        u.mywarning('warning: could not run ' + outPath + '/runOff')
-    stdout.close()
-    stderr.close()
-    return
-
-# ----------------------------------------------------------------------------
-# call commands to cat mosaics together
-# ----------------------------------------------------------------------------
-
-
-def assembleMosiacs(quadNames, outputRegions, outDir, baseFlags):
+    # make mask for region quadName
+    #print(':', pieceName, pieceGeodat, outputMaskShape)
+    mask = u.makeMaskFromShape(pieceGeodat, outputMaskShape)
+    # print(np.sum(mask), outputMaskShape)
+    # print(outputRegions[quadName][1], outputMaskShape)
+    # u.writeImage(outDir+'/masked/mask-'+quadName, mask, 'u1')
+    # Process velocity
+    velImage = u.geoimage(geoType='velocity', verbose=False)
+    piecePath = f'{outDir}/pieces/{pieceName}'
+    velImage.readData(piecePath)
+    # mask velocity
+    if len(mask) > 1:
+        imask = mask < 1
+        velImage.vx[imask] = np.nan
+        velImage.vy[imask] = np.nan
+        velImage.v[imask] = np.nan
+    # write velocity
+    velImage.writeData(f'{outDir}/masked/{pieceName}')
+    velImage = []
     #
-    # Assemble final mosaic
-    print('Assemble mosaics...')
-    components = ['.vx', '.vy', '.ex', '.ey']
+    # Process errors
+    errImage = u.geoimage(geoType='error', verbose=False)
+    # read errors
+    errImage.readData(piecePath)
+    # mask errors
+    if len(mask) > 1:
+        errImage.ex[imask] = np.nan
+        errImage.ey[imask] = np.nan
+    # write errors
+    errImage.writeData(f'{outDir}/masked/{pieceName}')
+    errImage = []
+    # dT - mask dT data created with timeOverlap
     if '-timeOverlap' in baseFlags:
-        components.append('.dT')
-    print(components)
-    # loop through each regional mosaic (north...)
-    for quadName in quadNames:
-        # loop through each component (.vx....)
-        for component in components:
-            # build command to cat data
-            command = 'cd '+outDir + ' ; cat '
-            for region in outputRegions[quadName][0]:
-                command += f' pieces/{region}{component}'
-            command += f' > intermediate/mosaic-{quadName}{component}'
-            call(command, shell=True, executable='/bin/csh',
-                 stdout=outputRegions[quadName][2],
-                 stderr=outputRegions[quadName][3])
-            # write geodat
-            outputRegions[quadName][1].writeGeodat(
-                outDir+'/intermediate/' + 'mosaic-' + quadName+component +
-                '.geodat')
-    return
-
-# ---------------------------------------------------------------------------
-# call commands to cat mosaics together
-# ---------------------------------------------------------------------------
+        dT = u.geoimage(geoType='scalar', verbose=False)
+        dT.readData(f'{piecePath}.dT')
+        if len(mask) > 1:
+            dT.x[imask] = np.nan
+        dT.writeData(f'{outDir}/masked/{pieceName}.dT')
+        dT = []
 
 
-def maskMosaics(quadNames, outputRegions, outDir, outputMaskShape, baseFlags):
+def maskMosaics(piecesFiles, piecesGeodats, outDir, outputMaskShape,
+                baseFlags):
     #
     # loop through each regional mosaic (north...)
     print('Mask mosaics...')
-    for quadName in quadNames:
-        #
-        # make mask for region quadName
-        print(':', outputRegions[quadName][1], outputMaskShape)
-        mask = u.makeMaskFromShape(outputRegions[quadName][1], outputMaskShape)
-        # print(np.sum(mask), outputMaskShape)
-        # print(outputRegions[quadName][1], outputMaskShape)
-        # u.writeImage(outDir+'/masked/mask-'+quadName, mask, 'u1')
-        # Process velocity
-        velImage = u.geoimage(geoType='velocity', verbose=False)
-        print('+', outDir+'/intermediate/mosaic-'+quadName)
-        velImage.readData(outDir+'/intermediate/mosaic-'+quadName)
-        # mask velocity
-        if len(mask) > 1:
-            imask = mask < 1
-            velImage.vx[imask] = np.nan
-            velImage.vy[imask] = np.nan
-            velImage.v[imask] = np.nan
-        # write velocity
-        velImage.writeData(outDir+'/masked/mosaic-'+quadName)
-        velImage = []
-        #
-        # Process errors
-        errImage = u.geoimage(geoType='error', verbose=False)
-        # read errors
-        errImage.readData(outDir+'/intermediate/mosaic-'+quadName)
-        # mask errors
-        if len(mask) > 1:
-            errImage.ex[imask] = np.nan
-            errImage.ey[imask] = np.nan
-        # write errors
-        errImage.writeData(outDir+'/masked/mosaic-'+quadName)
-        errImage = []
-        # dT - mask dT data created with timeOverlap
-        if '-timeOverlap' in baseFlags:
-            dT = u.geoimage(geoType='scalar', verbose=False)
-            dT.readData(outDir+'/intermediate/mosaic-'+quadName+'.dT')
-            if len(mask) > 1:
-                dT.x[imask] = np.nan
-            dT.writeData(outDir+'/masked/mosaic-'+quadName+'.dT')
-            dT = []
-    # u.myerror('mask stop')
+    threads = []
+    for pieceName, pieceGeodat in zip(piecesFiles, piecesGeodats):
+        threads.append(threading.Thread(target=maskMosaic,
+                                        args=[pieceName,
+                                              pieceGeodat,
+                                              outDir,
+                                              outputMaskShape,
+                                              baseFlags]))
+    u.runMyThreads(threads, 10, '', quiet=True)
     return
 
 # ---------------------------------------------------------------------------
@@ -618,31 +449,42 @@ def maskMosaics(quadNames, outputRegions, outDir, outputMaskShape, baseFlags):
 # ---------------------------------------------------------------------------
 
 
-def interpMosiacs(quadNames, outputRegions, outDir, interpSize, baseFlags):
+def interpMosiacs(piecesFiles, piecesGeodats, outDir, interpSize, baseFlags,
+                  stdouts, stderrs):
+    '''
+    Call intfloat to fill holes
+    '''
     components = ['.vx', '.vy']
     if '-timeOverlap' in baseFlags:
         components.append('.dT')
     # loop through each regional mosaic (north...)
     print('Interpolating Mosaics...')
-    for quadName in quadNames:
+    threads = []
+    for pieceName, pieceGeodat, stdout, stderr in zip(piecesFiles,
+                                                      piecesGeodats,
+                                                      stdouts, stderrs):
         # loop through each component (.vx....)
-        sx, sy = outputRegions[quadName][1].sizeInPixels()
+        sx, sy = pieceGeodat.sizeInPixels()
         #
         # loop over components to interp
         for component in components:
-            # build command to cat data
             # intfloat -thresh $intThresh1 -wdist -nr $NR -na $NA -ratThresh 1.
             command = f'cd {outDir}; intfloat  -thresh {interpSize} ' \
                 f' -wdist -nr {sx}  -na {sy} -ratThresh 1. ' \
-                f'masked/mosaic-{quadName}{component} > ' \
-                f'interp/mosaic-{quadName}{component}'
-            #  print(command)
+                f'masked/{pieceName}{component} > ' \
+                f'interp/{pieceName}{component}'
             #
-            call(command, shell=True, executable='/bin/csh',
-                 stdout=outputRegions[quadName][2],
-                 stderr=outputRegions[quadName][3])
-            outputRegions[quadName][1].writeGeodat(
-                f'{outDir}/interp/mosaic-{quadName}{component}.geodat')
+            threads.append(threading.Thread(target=call, args=[command],
+                                            kwargs={'shell': True,
+                                                    'executable': '/bin/csh',
+                                                    'stdout': stdout,
+                                                    'stderr': stderr}))
+
+            # call(command, shell=True, executable='/bin/csh',
+            #     stdout=stdout, stderr=stderr)
+            pieceGeodat.writeGeodat(
+                f'{outDir}/interp/{pieceName}{component}.geodat')
+    u.runMyThreads(threads, 10, '', quiet=True)
     return
 
 # ---------------------------------------------------------------------------
@@ -663,9 +505,9 @@ def mkQDirs(outDir, outputMaskTemplate):
         # print(outDir+'/pieces')
         os.mkdir(outDir+'/pieces')
     # directory for mosaics assembled from pieces
-    if not os.path.isdir(outDir+'/intermediate'):
-        # print(outDir+'/intermediate')
-        os.mkdir(outDir+'/intermediate')
+    # if not os.path.isdir(outDir+'/intermediate'):
+    #     # print(outDir+'/intermediate')
+    #     os.mkdir(outDir+'/intermediate')
     # directory for masked versions of mosaics
     if not os.path.isdir(outDir+'/masked'):
         # print(outDir+'/masked')
@@ -684,67 +526,66 @@ def mkQDirs(outDir, outputMaskTemplate):
         os.mkdir(outDir+'/shp')
     #
     # If no shape file specified, copy a template that takes out Ellesmere
-
-    if outputMaskTemplate is None:
-        template = True
+    shpFileBase = f'{outDir}/shp/{outDir}'
+    if outputMaskTemplate is not None:
         if not os.path.exists(outputMaskTemplate):
             u.myerror(
                 f'mkQdirs: nonexistent mask template ({outputMaskTemplate})')
-        shpFileBase = outDir+'/shp/'+outDir
-    else:
-        shpFileBase = outDir+'/shp/' +\
-            outputMaskTemplate.split('/')[-1].replace('.shp', '')
-        template = False
     #
     # Modify here for other regions.
     if outputMaskTemplate is not None:
-
-        # if this is a template file and it doesnt exits then copy or
-        # if its a custome file then copy (overwrite existing if need be)
-        # print(shpFileBase, template)
-        if not os.path.exists(shpFileBase+'.shp') or not template:
+        if not os.path.exists(f'{shpFileBase}.shp'):
             # get the files for that "shapefile"
-            shpFiles = u.dols(f'ls {outputMaskTemplate.replace(".shp", ".*")}')
+            print(outputMaskTemplate)
+            shpName = outputMaskTemplate.replace(".shp", ".*")
+            print(shpName)
+            shpFiles = sorted(glob.glob(shpName))
             # print(shpFiles)
             for shpFile in shpFiles:
-                command = f'cp {shpFile} {shpFileBase}.' \
-                    f'{shpFile.split(".")[-1]}'
-                call(command, shell=True, executable='/bin/csh')
-    outputMaskShape = shpFileBase+'.shp'
+                shutil.copyfile(shpFile,
+                                f'{shpFileBase}.{shpFile.split(".")[-1]}')
+    outputMaskShape = f'{shpFileBase}.shp'
     return outputMaskShape
 
-# ---------------------------------------------------------------------------
-# call commands to cat mosaics together
-# ---------------------------------------------------------------------------
+
+def writeQTiff(pieceFile, outDir, baseFlags, epsg, wktFile):
+    velImage = u.geoimage(geoType='velocity', verbose=False)
+    velRootIn = f'{outDir}/interp/{pieceFile}'
+    velRootOut = f'{outDir}/tiff/{pieceFile}'
+    print(f'Reading {velRootIn}')
+    velImage.readData(velRootIn)
+    velImage.writeMyTiff(velRootOut, epsg=epsg, wktFile=wktFile,
+                         computeStats=False)
+    # Errors
+    errImage = u.geoimage(geoType='error', verbose=False)
+    errImage.readData(f'{outDir}/masked/{pieceFile}')
+    errImage.writeMyTiff(velRootOut, epsg=epsg, wktFile=wktFile,
+                         computeStats=False)
+    # dT if applicable
+    if '-timeOverlap' in baseFlags:
+        dT = u.geoimage(geoType='scalar', verbose=False)
+        dT.readData(f'{velRootIn}.dT')
+        dT.writeMyTiff(f'{velRootOut}.dT', epsg=epsg,
+                       wktFile=wktFile, noDataDefault=-2.0e9,
+                       computeStats=False)
 
 
-def writeQTiffs(quadNames, outDir, baseFlags):
+def writeQTiffs(piecesFiles, outDir, baseFlags):
+    epsg = regionDefs.epsg()
+    wktFile = regionDefs.wktFile()
     #
     # Loop over quadrants and write tiffs
     print('Writing tiffs....')
-    epsg = regionDefs.wktFile()
-    wktFile = regionDefs.wktFile()
     #
-    for quadName in quadNames:
-        velImage = u.geoimage(geoType='velocity', verbose=False)
-        print('Reading '+outDir+'/interp/mosaic-'+quadName)
-        velImage.readData(f'{outDir}/interp/mosaic-{quadName}')
-        velImage.writeMyTiff(f'{outDir}/tiff/{quadName}', epsg=epsg,
-                             wktFile=wktFile)
-        velImage = []
-        # Errors
-        errImage = u.geoimage(geoType='error', verbose=False)
-        errImage.readData(outDir+'/masked/mosaic-'+quadName)
-        errImage.writeMyTiff(outDir+'/tiff/'+quadName, epsg=epsg,
-                             wktFile=wktFile)
-        errImage = []
-        # dT if applicable
-        if '-timeOverlap' in baseFlags:
-            dT = u.geoimage(geoType='scalar', verbose=False)
-            dT.readData(outDir+'/interp/mosaic-'+quadName+'.dT')
-            dT.writeMyTiff(outDir+'/tiff/'+quadName+'.dT', epsg=epsg,
-                           wktFile=wktFile, noDataDefault=-2.0e9)
-            dT = []
+    threads = []
+    for pieceFile in piecesFiles:
+        threads.append(threading.Thread(target=writeQTiff,
+                                        args=[pieceFile,
+                                              outDir,
+                                              baseFlags,
+                                              epsg,
+                                              wktFile]))
+    u.runMyThreads(threads, 10, '', quiet=True)
     return
 
 # ---------------------------------------------------------------------------
@@ -752,21 +593,20 @@ def writeQTiffs(quadNames, outDir, baseFlags):
 # ---------------------------------------------------------------------------
 
 
-def makeQVRTSs(quadNames, outDir, baseFlags):
+def makeQVRTSs(piecesFiles, outDir, template):
     print('Making VRTS...')
     suffixes = ['.vx', '.vy', '.v', '.ex', '.ey']
-    if '-timeOverlap' in baseFlags:
+    if '-timeOverlap' in template['baseFlags']:
         suffixes.append('.dT')
     noData = {'.vx': -2.e9, '.vy': -2.0e9, '.v': -1, '.ex': -1, '.ey': -1,
               '.dT': -2.0e9}
     print('Creating vrts....')
-    #p, _ = projWin(iceSheetRegion)
     for suffix in suffixes:
         command = f'cd  {outDir}/tiff ; ' \
-            f'gdalbuildvrt -te {myProjWin["xmin"]} {myProjWin["ymin"]} ' \
-            f'{myProjWin["xmax"]} {myProjWin["ymax"]} ' \
-            f'-tr {myProjWin["dx"]} {myProjWin["dy"]} -vrtnodata' \
-            f' {noData[suffix]} {outDir+suffix}.vrt *{suffix}.tif'
+            f'gdalbuildvrt -te {template["xmin"]} {template["ymin"]} ' \
+            f'{template["xmax"]} {template["ymax"]} ' \
+            f'-tr {template["dx"]} {template["dy"]} -vrtnodata' \
+            f' {noData[suffix]} {outDir}{suffix}.vrt *{suffix}.tif'
         print(command)
         call(command, shell=True, executable='/bin/csh')
 
@@ -801,7 +641,7 @@ def processLsList(lsFile, firstDate, lastDate, outDir, noReprocess=False):
         #
         # compute wSkew - use to discard scenes where the center date is >
         # one windowWidth from the center of the window.
-        obsWindow = lsdat.date2-lsdat.date1
+        obsWindow = lsdat.date2 - lsdat.date1
         centerObsDate = lsdat.date1 + obsWindow*.5
         percentCover = windowWidth/obsWindow
         wSkew = abs(centerWindowDate - centerObsDate)
@@ -824,7 +664,7 @@ def makeShapeOutputs(outDir, firstDate, lastDate):
     print('Making Shape Files...')
     #
     # setup radar shapes
-    inputFile = u.dols('ls ' + outDir + '/pieces/inputFile-*')[0]
+    inputFile = sorted(glob.glob(f'{outDir}/pieces/inputFile.*'))[0]
     if not os.path.isdir(outDir+'/meta'):
         os.mkdir(outDir+'/meta')
     command = 'makeimageshapefile.py -velocity -firstdate ' \
@@ -842,7 +682,7 @@ def makeShapeOutputs(outDir, firstDate, lastDate):
         command = f'pathrowshp.py ' \
             f'-firstdate={firstDate.strftime("%Y:%m:%d")}' \
             f' -lastdate={lastDate.strftime("%Y:%m:%d")}' \
-            f' {lsFile} {outDir}/meta/LS8.' \
+            f' {lsFile} {outDir}/meta/LS.' \
             f'{firstDate.strftime("%Y-%m-%d")}.' \
             f'{lastDate.strftime("%Y-%m-%d")}'
         print(command)
@@ -850,98 +690,140 @@ def makeShapeOutputs(outDir, firstDate, lastDate):
     # done
     return
 
-# ---------------------------------------------------------------------------
-# make typical rsfig map and save in preview
-# ---------------------------------------------------------------------------
-
-
-def makeLogMap(outDir, quadNames):
-    print('Making Log Maps...')
-    #
-    jpgRes = '500'
-    print('ffff')
-    #myProj, _ = projWin(iceSheetRegion)
-    print(f'makeLogMap {myProjWin}')
-    # setup radar shapes
-    if not os.path.isdir(outDir+'/preview'):
-        os.mkdir(outDir+'/preview')
-    u.pushd(outDir+'/preview')
-
-    for quadName in quadNames:
-        command = f"idl -e \"rsfig,maxv=3000,/nobar,file='../interp/mosaic-" \
-            f"{quadName}',geohue='{quadName}.browse.tif'"
-        if iceSheetRegion == 'amundsen' or myProjWin['epsg'] == 3031:
-            command += ',/south'
-        elif iceSheetRegion == 'taku':
-            command += ',/taku'
-        if 'south' in quadName:
-            command += ",labels=[" \
-                "'NASA MEaSUREs GrIMP Ice Velocity Map'," \
-                "'Produced using one or more of the following:'," \
-                "'Copernicus Sentinel 1 data processed by ESA'," \
-                "'TerraSAR-X/TanDEM-X data processed by DLR'," \
-                "'Landsat 8 data processed by USGS']"
-        command += '"'
-        print(command)
-        call(command, shell=True, executable='/bin/csh')
-    # clean up
-    if os.path.exists('tmp.tif'):
-        os.remove('tmp.tif')
-    #p, _ = projWin(iceSheetRegion)
-    epsg = regionDefs.epsg()
-    if epsg is not None:
-        myProj = f'EPSG:{epsg}'
-    else:
-        myProj = regionDefs.wktFile()
-    command = f'gdalbuildvrt -a_srs {myProj} -te {myProjWin["xmin"]}  ' \
-        f'{myProjWin["ymin"]} {myProjWin["xmax"]} {myProjWin["ymax"]} ' \
-        f'-tr {myProjWin["dx"]} {myProjWin["dy"]} ' \
-        f'-hidenodata -vrtnodata "255 255 255" {outDir}.browse.vrt' \
-        f' *.tif'
-    call(command, shell=True, executable='/bin/csh')
-    command = f'gdaladdo -r average {outDir}.browse.vrt 2 4 8 16'
-    call(command, shell=True, executable='/bin/csh')
-    command = f'gdal_translate -co "QUALITY=99" -scale -of JPEG -r '\
-        f'average -tr {jpgRes} {jpgRes} ' \
-        f'-of jpeg {outDir}.browse.vrt {outDir}.browse.jpg'
-    call(command, shell=True, executable='/bin/csh')
-    u.popd()
 
 # ---------------------------------------------------------------------------
 # make the preview
 # ---------------------------------------------------------------------------
 
 
-def processFinalPreview(outDir):
-    ''' Create the final preview '''
-    # merge preview images
-    u.pushd(outDir+'/preview')
-    # get the file name
-    vrtpreview = u.dols('ls *browse*.vrt')[0]
-    #
-    finalBrowse = finalName(vrtpreview)
-    # command = f'rio cogeo create {vrtpreview} ../release/{finalBrowse}' \
-    #    f' --overview-resampling average'
-    #
-    command = 'gdal_translate -of COG -co COMPRESS=DEFLATE ' \
-        '-co RESAMPLING=AVERAGE -co OVERVIEWS=IGNORE_EXISTING ' \
-        '-co GEOTIFF_VERSION=1.1 -co BIGTIFF=NO -stats ' \
-        f'{vrtpreview} ../release/{finalBrowse}'
-    print(command)
-    call(command, shell=True, executable='/bin/csh')
-    for suffix in ['jpg', 'jpg.aux.xml']:
-        shutil.copyfile(f'{outDir}.browse.{suffix}',
-                        f'../release/{finalBrowse.replace("tif", suffix)}')
-    u.popd()
+def getWKT(template):
+    if template['wktFile'] is not None:
+        wkt = readWKT(template['wktFile'])
+    elif template['epsg'] is not None:
+        sr = osr.SpatialReference()
+        sr.ImportFromEPSG(template['epsg'])
+        wkt = sr.ExportToWkt()
+    return wkt
 
-# ---------------------------------------------------------------------------
-# make typical rsfig map and save in preview
-# ---------------------------------------------------------------------------
+
+def writeRGBTiff(tiffFile, rgb, template):
+    '''
+    Write an RGB tiff for preview
+    '''
+    options = ['BIGTIFF=NO', 'COMPRESS=LZW', 'GEOTIFF_VERSION=1.1',
+               'RESAMPLING=AVERAGE', 'PREDICTOR=YES']
+    # Create mem version
+    driver = gdal.GetDriverByName('MEM')
+    dst_ds = driver.Create('', template['sx'], template['sy'], 3,
+                           gdal.GDT_Byte)
+    dst_ds.SetGeoTransform((template['xmin'], template['dx'], 0,
+                            template['ymax'], 0, -template['dy']))
+    # set projection
+    wkt = getWKT(template)
+    dst_ds.SetProjection(wkt)
+    # driver specific stuff
+    #
+    dst_ds.FlushCache()
+    # Create copy for the COG.
+    for index in range(0, 3):
+        band = np.squeeze(rgb[:, :, index]*255).astype(np.uint8)
+        dst_ds.GetRasterBand(index+1).WriteArray(band)
+    # Now make a copy
+    driver = gdal.GetDriverByName('COG')
+    dst_ds2 = driver.CreateCopy(tiffFile, dst_ds, options=options)
+    dst_ds2.FlushCache()
+    dst_ds.FlushCache()
+    del(dst_ds)
+    del(dst_ds2)
+    gc.collect()
+
+
+def addLabel(rgb, template):
+    '''
+    Label image with ESA credit
+    '''
+    labels = ['NASA MEaSUREs GrIMP Ice Velocity Map',
+              'Produced using one or more of the following:',
+              'Copernicus Sentinel 1 data processed by ESA',
+              'TerraSAR-X/TanDEM-X data processed by DLR',
+              'Landsat 8 data processed by USGS']
+    # Remove GrIMP for non Greenland products
+    if template['epsg'] != 3413:
+        labels = labels[1:]
+    if 'xLabel' not in template or 'yLabel' not in template:
+        return
+    #
+    font = ImageFont.truetype("/usr/share/fonts/dejavu/DejaVuSans.ttf", 75)
+    dy = 80
+    xl, yl = template['xLabel'], rgb.shape[0] - template['yLabel']
+    #
+    #  Label each band
+    for bnum in range(0, 3):
+        img = Image.fromarray(np.squeeze(rgb[:, :, bnum]))
+        draw = ImageDraw.Draw(img)
+        # Burn in each line
+        for textLabel, i, in zip(labels, range(0, len(labels))):
+            location = [xl, yl + i * dy]
+            draw.text(location, textLabel, fill=0, font=font)
+            rgb[:, :, bnum] = np.array(img)
+    return rgb
+
+
+def writeJPG(browseTiff):
+    ''' Make jpg quicklook browse '''
+    jpgFile = browseTiff.replace('.tif', '.jpg')
+    jpgRes = 500
+    command = f'gdal_translate -co "QUALITY=99" -scale -of JPEG -r ' \
+        f'average -tr {jpgRes} {jpgRes} {browseTiff} {jpgFile}'
+    call(command, shell=True, executable='/bin/csh')
+
+
+def processFinalPreview(outDir, template):
+    '''
+    Create the final preview
+    '''
+    #
+    finalSpeed = glob.glob(f'{outDir}/release/*vv*.tif')[0]
+    finalBrowse = finalSpeed.replace('vv', 'browse')
+    # Create a long scale rgb image the same way idl code did
+    vmin, vmax = 1, 3000
+    v = u.geoimage(geoType='scalar')
+    v.readData(finalSpeed, tiff=True, epsg=template['epsg'],
+               wktFile=template['wktFile'])
+    speed = v.x
+    background = speed < 0
+    print('Speed', speed.shape)
+    # Use fixed value
+    value = np.full(speed.shape, 1).astype('float32')
+    # Use speed dependent saturation
+    saturation = np.clip((speed/125 + .5)/1.5, 0, 1).astype('float32')
+    saturation[background] = 0
+    # Compute speed dependent
+    hue = np.log10(np.clip(speed, vmin, vmax)) / \
+        (np.log10(vmax) - np.log(vmin)).astype('float32')
+    # order axes so rgb bands indexed last for imshow
+    hsv = np.moveaxis(
+        np.array([hue, saturation, value]), 0, 2).astype('float32')
+    # Flip for tiff output
+    rgb = np.flipud(colors.hsv_to_rgb(hsv))
+    print('RGB', rgb.shape)
+    del(hsv)
+    gc.collect()
+    # Label image
+    rgb = addLabel(rgb, template)
+    # Write result to release dir
+    writeRGBTiff(finalBrowse, rgb, template)
+    del(rgb)
+    gc.collect
+    #
+    writeJPG(finalBrowse)
 
 
 def prodType(d1, d2):
-    ''' Use duration to determine monthly, quarterly.
-    Expand types as needed in future'''
+    '''
+    Use duration to determine monthly, quarterly.
+    Expand types as needed in future
+    '''
     dT = (d2-d1).days
     if dT <= 12:
         return 's1cycle'
@@ -959,29 +841,16 @@ def prodType(d1, d2):
                   f' products, fix or update code for new type')
 
 
-def getRegionID():
-    regionIDs = {'greenland': 'GL', 'amundsen': 'ASE', 'taku': 'TAKU'}
-    if iceSheetRegionFile is not None:
-        regionIDs['custom'] = readCustomFile(key='regionID')
-    try:
-        regionID = regionIDs[iceSheetRegion]
-    except Exception:
-        u.error(f'finalName: Invalid region name {regionID} not in dict '
-                f'{regionIDs}')
-    return regionID
-
-
-def finalName(vrt):
-    ''' Create final name from intermediate vrt name '''
-    #regionID = getRegionID()
-    pieces = vrt.split('.')
+def finalName(vrt, flags, pType):
+    '''
+    Create final name from intermediate vrt name
+    '''
     # dates
-    d1 = datetime.strptime(pieces[0], 'Vel-%Y-%m-%d')
-    d2 = datetime.strptime(pieces[1], '%Y-%m-%d')
+    d1 = flags['firstdate']
+    d2 = flags['lastdate']
     # compute prefix
     myPrefix = prodType(d1, d2)
     # vx, vy...
-    pType = pieces[2]
     if pType == 'v':
         pType = 'vv'
     print(currentVersions)
@@ -994,59 +863,28 @@ def finalName(vrt):
     return name
 
 
-def processFinalVRTs(outDir, releaseDir, cloudOptimize):
+def processFinalVRTs(outDir, releaseDir, flags):
     ''' Use the vrts for the individual pieces to build the finall tiffs'''
     u.pushd(outDir+'/tiff')
-    vrts = u.dols('ls *.vrt')
+    vrts = sorted(glob.glob('*.vrt'))
     #
+    threads = []
     for vrt in vrts:
-        print(vrt)
-        pName = finalName(vrt)
+        pType = vrt.split('.')[-2]
+        pName = finalName(vrt, flags, pType)
         # cloud optimize - use rio because it works with the
         # vrt (if single, would be automatic)
-        if cloudOptimize:
-            # command = f'rio cogeo create {vrt} ../release/{pName} ' \
-            #    f'--overview-resampling average' \
-            #    f' ; gdalinfo -stats  ../release/{pName}'
-            command = 'gdal_translate -of COG -co COMPRESS=DEFLATE ' \
-                     '-co RESAMPLING=AVERAGE -co OVERVIEWS=IGNORE_EXISTING ' \
-                     '-co GEOTIFF_VERSION=1.1 -co BIGTIFF=NO -stats ' \
-                     f'{vrt} ../release/{pName}'
-            # command += '; gdaladdo -r average ../release/{pName} ' \
-            #    '2 4 8 16 32 64 128'
-        # old format
-        else:
-            #p, _ = projWin(iceSheetRegion)
-            pw = f'{myProjWin["xmin"]} {myProjWin["ymax"]} ' \
-                f'{myProjWin["xmax"]} {myProjWin["ymin"]} ' \
-                f'-te {myProjWin["dx"]} {myProjWin["dy"]}'
-            command = f'gdal_translate  -co "COMPRESS=LZW" -co "PREDICTOR=1"'\
-                f' -co "TILED=YES" -projwin {pw+vrt} ../release/{pName}'
+        command = 'gdal_translate -of COG -co COMPRESS=DEFLATE ' \
+            '-co RESAMPLING=AVERAGE -co OVERVIEWS=IGNORE_EXISTING ' \
+            '-co GEOTIFF_VERSION=1.1 -co BIGTIFF=NO -stats ' \
+            f'{vrt} ../release/{pName}'
         print(command)
-        call(command, shell=True, executable='/bin/csh')
+        threads.append(threading.Thread(target=call, args=[command],
+                                        kwargs={'shell': True,
+                                                'executable': '/bin/csh'}))
+        #call(command, shell=True, executable='/bin/csh')
+    u.runMyThreads(threads, 8, '', quiet=True)
     u.popd()
-    #
-    # Old format, only happens if not cloud optimized.
-    # now make pyramids and vrt
-    if not cloudOptimize:
-        u.pushd(releaseDir)
-        tiffs = u.dols('ls *.tif')
-        for tiff in tiffs:
-            command = f'gdalbuildvrt {tiff.replace(".tif", ".vrt")} tiff ; ' \
-                f'gdaladdo  -r average {tiff.replace(".tif", ".vrt") }' \
-                ' 32 16 8 4 2'
-            print(command)
-            call(command, shell=True, executable='/bin/csh')
-        u.popd()
-
-
-def makePyramidsForOldFormat(releaseDir):
-    ''' Legacy routine to create pyramids for vrt '''
-    vrtpreview = u.dols('ls *browse*.vrt')[0]
-    command = f'gdaladdo  -r average {vrtpreview.replace(".vrt", ".tif")}' \
-        ' 32 16 8 4 2'
-    print(command)
-    call(command, shell=True, executable='/bin/csh')
 
 
 def prepareReleaseDir(releaseDir):
@@ -1056,7 +894,9 @@ def prepareReleaseDir(releaseDir):
     # otherwise clean out any old tif files
     else:
         u.pushd(releaseDir)
-        tiffs = u.dols('ls *.tif *.ovr *.vrt')
+        tiffs = []
+        for pattern in ['*.tif', '*.ovr', '*.vrt']:
+            tiffs += glob.glob(pattern)
         for tiff in tiffs:
             os.remove(tiff)
         u.popd()
@@ -1091,16 +931,18 @@ def checkFullShape(shapeFile):
     return True
 
 
-def LS8Count(LS8shp):
+def containsLS(LSshp, satType):
     ''' check how many records'''
     # no file so return zero records
-    if not checkFullShape(LS8shp):
-        return 0
-    # count recoreds
-    current = shapefile.Reader(LS8shp)
-    nRecords = len(current.records())
-    current = []
-    return nRecords
+    if not checkFullShape(LSshp):
+        return False
+    # return true if any found
+    shapeData = gpd.read_file(LSshp)
+    for column in ['LSImage1', 'LSImage2']:
+        for sat in {'LS8': ['LC8', 'LC08'], 'LS9': ['LC09']}[satType]:
+            if len(shapeData.loc[shapeData[column].str.contains(sat)]) > 0:
+                return True
+    return False
 
 
 def SatTypes(outDir, shapeFilesNames, currentDir=False):
@@ -1109,22 +951,26 @@ def SatTypes(outDir, shapeFilesNames, currentDir=False):
         u.pushd(f'{outDir}/release')
     # any records, record LS8 present
     sTypes = {'S1A': False, 'S1B': False, 'TSX': False, 'TDX': False,
-              'CSK': False, 'LS8': False, 'RADARSAT-1': False,
+              'CSK': False, 'LS8': False, 'LS9': False, 'RADARSAT-1': False,
               'ALOS1-PALSAR': False, 'ERS-1/2': False}
-    if LS8Count(shapeFilesNames['LS8']) > 0:
-        sTypes['LS8'] = True
-    # check file exists
-    if not checkFullShape(shapeFilesNames['SAR']):
-        u.mywarning(f'SatTypes: Missing shapefile {shapeFilesNames["SAR"]} '
-                    f'in directory {os.getcwd()}')
-        return sTypes
+    print(shapeFilesNames)
+    if 'LS' in shapeFilesNames:
+        for LStype in ['LS8', 'LS9']:
+            if containsLS(shapeFilesNames['LS'], LStype):
+                sTypes[LStype] = True
+        # check file exists
+        if not checkFullShape(shapeFilesNames['SAR']):
+            u.mywarning(f'SatTypes: Missing shapefile {shapeFilesNames["SAR"]}'
+                        f' in directory {os.getcwd()}')
+            return sTypes
     # check sar shapes
-    current = shapefile.Reader(shapeFilesNames['SAR'])
-    myDict = dict(zip([x[0] for x in current.fields],
-                      range(0, len(current.fields))))
-    for myRecord in current.records():
-        sTypes[myRecord[myDict['SAT1']]] = True
-    current = []
+    if 'SAR' in shapeFilesNames:
+        current = shapefile.Reader(shapeFilesNames['SAR'])
+        myDict = dict(zip([x[0] for x in current.fields],
+                          range(0, len(current.fields))))
+        for myRecord in current.records():
+            sTypes[myRecord[myDict['SAT1']]] = True
+        current = []
     if not currentDir:
         u.popd()
     return sTypes
@@ -1139,11 +985,12 @@ def makeShapePremet(outDir, myShapeName,  shapeType, sTypes, firstDate,
     preMetFile = myShapeName.replace('.shp', '.premet')
     preMets = []
     # Split sar/optical platforms based on shapeType
-    mySats = {'LS8': ['LS8'], 'SAR': ['S1A', 'S1B', 'TSX', 'TDX', 'CSK']}
+    mySats = {'LS': ['LS8', 'LS9'],
+              'SAR': ['S1A', 'S1B', 'TSX', 'TDX', 'CSK']}
     validPlatforms = {}
     for mySat in mySats[shapeType]:
         validPlatforms[mySat] = sTypes[mySat]
-    print(validPlatforms)
+    # print('validPlatforms:', validPlatforms)
     #
     preMets = populatePremet(preMets, firstDate, lastDate,
                              validPlatforms=validPlatforms)
@@ -1162,10 +1009,10 @@ def makeShapePremet(outDir, myShapeName,  shapeType, sTypes, firstDate,
 
 def makeFinalShapes(firstDate, lastDate):
     ''' Create the final shape files by copying from meta directory'''
-    shapeFileNames = {'SAR': None, 'LS8': None}
-    for shapeType in ['SAR', 'LS8']:  # Loop for each type
+    shapeFileNames = {'SAR': None, 'LS': None}
+    for shapeType in ['SAR', 'LS']:  # Loop for each type
         # get meta file versions
-        shapeFiles = u.dols(f'ls ../meta/{shapeType}.*.*.*')
+        shapeFiles = sorted(glob.glob(f'../meta/{shapeType}.*.*.*'))
         # if more than 1, then copy (avoids .shp only)
         if len(shapeFiles) > 1:
             # loop on files
@@ -1182,25 +1029,26 @@ def makeFinalShapes(firstDate, lastDate):
     return shapeFileNames
 
 
-def makeFinalOutput(outDir, quadNames, cloudOptimize, firstDate, lastDate):
+def makeFinalOutput(outDir, template, flags):
     ''' Call routines to build final outputs (e.g., release) '''
     print('Making Final ouputs...')
     # setup release dir
     releaseDir = outDir+'/release'
+    # u.mywarning('uncomment prepare release')
     prepareReleaseDir(releaseDir)
     #
     # switch to tiff dir and make single tiffs
-    processFinalVRTs(outDir, releaseDir, cloudOptimize)
+    # u.mywarning('uncomment process final')
+    processFinalVRTs(outDir, releaseDir, flags)
     #
     # this will assemble preview from pieces into single cog tif
-    processFinalPreview(outDir)
+    print('Making preview....')
+    processFinalPreview(outDir, template)
     #
-    # make pyramids and copy shape
+    # Make final shape
     u.pushd(releaseDir)
-    if not cloudOptimize:
-        makePyramidsForOldFormat(releaseDir)
     # copy shape files
-    shapeFileNames = makeFinalShapes(firstDate, lastDate)
+    shapeFileNames = makeFinalShapes(flags['firstdate'], flags['lastdate'])
     u.popd()
     return shapeFileNames
 
@@ -1218,32 +1066,43 @@ def populatePremet(preMetData, firstDate, lastDate, validPlatforms={}):
     CSKsens = {'CSK': 'X-SAR', 'CSKS1': 'X-SAR', 'CSKS2': 'X-SAR',
                'CSKS3': 'X-SAR', 'CSKS4': 'X-SAR'}
     sensorShort = {'S1A': 'C-SAR', 'S1B': 'C-SAR', 'TSX': 'X-SAR',
-                   'TDX': 'X-SAR', 'LS8': 'PAN', 'RADARSAT-1': 'C-SAR',
+                   'TDX': 'X-SAR', 'LS8': 'OLI', 'LS9': 'OLI-2',
+                   'RADARSAT-1': 'C-SAR',
                    'ERS-1/2': 'C-SAR', 'ALOS1-PALSAR': 'PALSAR'}
     sensorShort = {**CSKsens, **sensorShort}
     CSKinst = {'CSK': 'X-SAR', 'CSKS1': 'X-SAR', 'CSKS2': 'X-SAR',
                'CSKS3': 'X-SAR', 'CSKS4': 'X-SAR'}
     instShort = {'S1A': 'C-SAR', 'S1B': 'C-SAR', 'TSX': 'X-SAR',
-                 'TDX': 'X-SAR', 'LS8': 'OLI', 'RADARSAT-1': 'C-SAR',
+                 'TDX': 'X-SAR', 'LS8': 'OLI', 'LS9': 'OLI-2',
+                 'RADARSAT-1': 'C-SAR',
                  'ERS-1/2': 'C-SAR', 'ALOS1-PALSAR': 'PALSAR'}
     instShort = {**CSKinst, **instShort}
     cskIns = {'CSKS1': 'COSMO-SKYMED 1', 'CSKS2': 'X-SAR',
               'CSKS3': 'COSMO-SKYMED 3', 'CSKS4': 'COSMO-SKYMED 4'}
-    instrument = {'S1A': 'SENTINEL-1A', 'S1B': 'SENTINEL-1B', 'TSX': 'TSX',
-                  'TDX': 'TDX', 'CSK': 'COSMO-SKYMED', 'LS8': 'LANDSAT-8',
+    instrument = {'S1A': 'Sentinel-1A', 'S1B': 'Sentinel-1B', 'TSX': 'TSX',
+                  'TDX': 'TDX', 'CSK': 'COSMO-SKYMED',
+                  'LS8': 'LANDSAT-8', 'LS9': 'LANDSAT-9',
                   'RADARSAT-1': 'RADARSAT-1', 'ERS-1/2': 'ERS-1-2',
                   'ALOS1-PALSAR': 'ALOS1-PALSAR'}
     instrument = {**instrument, **cskIns}
     for platform in validPlatforms.keys():
+        # print('VP Key', platform)
         if validPlatforms[platform]:
             myPlatform = {'AssociatedPlatformShortname': instrument[platform],
                           'AssociatedInstrumentShortname': instShort[platform],
                           'AssociatedSensorShortname': sensorShort[platform]}
-            preMetData.append(s.premet(myPlatform, container='Platforms'))
+            preMetData.append(
+                s.premet(myPlatform,
+                         container='AssociatedPlatformInstrumentSensor'))
     #
-    dataSetID = {'DataSetId': 'MEaSUREs Greenland '
-                 f'{prodType(firstDate,lastDate)} Ice Sheet Velocity '
-                 f'Mosaics from SAR and Landsat'}
+    pType = prodType(firstDate, lastDate)
+    idString = 'MEaSUREs Greenland {pType} Ice Sheet Velocity '
+    if pType != 's1cycle':
+        idString += 'Mosaics from SAR and Landsat'
+    else:
+        idString += 'Mosaics from SAR'
+    #
+    dataSetID = {'DataSetId': idString}
     # force this to be first
     preMetData = [s.premet(dataSetID, container='Collection')] + preMetData
     return preMetData
@@ -1257,7 +1116,7 @@ def makePremets(preMets, outDir, sTypes):
     preMetFiles = []
     # regionID = getRegionID()
     for suffix in suffixes:
-        velX = u.dols(f'ls -d {regionID}_vel*{suffix}*.tif')
+        velX = sorted(glob.glob(f'{regionID}_vel*{suffix}*.tif'))
         if len(velX) == 0:
             u.myerror(
                 f'makePremets: could not find release/{regionID}_vel*{suffix}'
@@ -1281,67 +1140,111 @@ def makePremets(preMets, outDir, sTypes):
     return preMetFiles
 
 
-def makeSpatial(outDir, spatialFile):
+def makeSpatial(outDir, spatialFile, template):
     ''' write spatial file '''
     u.pushd(f'{outDir}/release')
-    # assume makePremet error check
-    fp = open(spatialFile, 'w')
-    #_, corners = projWin(iceSheetRegion)
-    # corner points
-    print(f'{llCorners["ll"]["lon"]:10.5f} {llCorners["ll"]["lat"]:10.5f}',
-          file=fp)
-    print(f'{llCorners["ul"]["lon"]:10.5f} {llCorners["ul"]["lat"]:10.5f}',
-          file=fp)
-    print(f'{llCorners["ur"]["lon"]:10.5f} {llCorners["ur"]["lat"]:10.5f}',
-          file=fp)
-    print(f'{llCorners["lr"]["lon"]:10.5f} {llCorners["lr"]["lat"]:10.5f}',
-          file=fp)
+    print(f'Making spatial file {spatialFile} in {outDir}/release')
     #
-    fp.close()
+    llCorners = mosf.makeImageLLCorners(template, template)
+    # assume makePremet error check
+    with open(spatialFile, 'w') as fp:
+        # corner points
+        print(f'{llCorners["ll"]["lon"]:10.5f} {llCorners["ll"]["lat"]:10.5f}',
+              file=fp)
+        print(f'{llCorners["ul"]["lon"]:10.5f} {llCorners["ul"]["lat"]:10.5f}',
+              file=fp)
+        print(f'{llCorners["ur"]["lon"]:10.5f} {llCorners["ur"]["lat"]:10.5f}',
+              file=fp)
+        print(f'{llCorners["lr"]["lon"]:10.5f} {llCorners["lr"]["lat"]:10.5f}',
+              file=fp)
+    #    fp.close()
     u.popd()
 
 
-def processQuadrants(quadNames, quadrants, outDir, dateTakes, firstDate,
-                     lastDate, baseFlags, lsCulledFile, dem, noCull,
-                     noReprocess=False):
-    ''' loop through and process each quadrant'''
-    threads, outputRegions = [], {}
-    for quadName in quadNames:
-        print(quadName)
+def runSubMosaic(outPath, inputFileName, outFileName, baseFlags, firstDate,
+                 lastDate, lsFile, dem, stdout, stderr):
+    '''
+    run sub mosaics (called as a thread).
+    '''
+    #
+    # open outputs and check
+    try:
         #
-        # get lmits and geodat for submosaic
-        limits, geodat = findLimitsQ(quadrants[quadName])
-        #
-        nl = 0
-        outPieces = []
-        #
-        # Setup each submosaic
-        for limit in limits:
-            print(limit)
-            stdout = open(f'{outDir}/io/{quadName}.stdout.{nl:03d}', 'w')
-            stderr = open(f'{outDir}/io/{quadName}.stderr.{nl:03d}', 'w')
-            # files names for submoaic
-            inFileSub = f'inputFile-{quadName}.{nl:03d}'
-            outFileSub = f'mosaic-{quadName}.{nl:03d}'
-            # save names of ouput mosaics
+        productType = prodType(firstDate, lastDate)
+        firstDateAdjusted, lastDateAdjusted = firstDate, lastDate
+        # This expands limits so the phase data can included.
+        # Offsets data should be filtered through the input.
+        if productType == 'Annual':
+            firstDateAdjusted = firstDateAdjusted + timedelta(-61)
+            lastDateAdjusted = lastDateAdjusted + timedelta(121)
+        # run cull command if doCull set (otherwise only apply coverage
+        flags = baseFlags + ' -date1 ' + firstDateAdjusted.strftime('%m-%d-%Y')
+        flags += ' -date2 ' + lastDateAdjusted.strftime('%m-%d-%Y')
+        if lsFile is not None:
+            flags += f' -landSat {lsFile}'
+        command = f'cd {outPath}; mosaic3d -writeBlank -center {flags} ' \
+            f'pieces/{inputFileName} {dem} pieces/{outFileName}'
+        print(command, file=stdout)
+        call(command, shell=True, executable='/bin/csh', stdout=stdout,
+             stderr=stderr)
+    except Exception:
+        # if missing files, reject to the NoResult directory
+        u.mywarning(f'warning: could not run {outPath}/runOff')
+    return
+
+
+def processSectors(template, flags, outDir, dataTakes, lsCulledFile):
+    '''
+    Breakup into sections
+    '''
+    threads, outPieces, geoPieces, stderrs, stdouts = [], [], [], [], []
+    xdims, ydims, srsInfo, mTemp = mosf.sectionTemplate(template['template'])
+    if regionDefs.epsg() is not None:
+        wkt = regionDefs.epsg()
+    else:
+        try:
+            with open(regionDefs.wktFile(), 'r') as fp:
+                wkt = fp.readline()
+        except Exception:
+            u.myerror(f'Problem reading wkt file: {regionDefs.wktFile()}')
+    #
+    for xdim, xi in zip(xdims, range(len(xdims))):
+        for ydim, yi in zip(ydims, range(len(ydims))):
+            stdout = open(f'{outDir}/io/pieces.stdout.{xi:03d}.{yi:03d}', 'w')
+            stdouts.append(stdout)
+            stderr = open(f'{outDir}/io/pieces.stderr.{xi:03d}.{yi:03d}', 'w')
+            stderrs.append(stderr)
+            #
+            inputSubFile = f'inputFile.{xi:03d}.{yi:03d}'
+            outFileSub = f'mosaic-{xi:03d}.{yi:03d}'
             outPieces.append(outFileSub)
-            # create the input file used to make the mosaic
-            if not noReprocess:
-                writeInputFileQ(f'{outDir}/pieces/{inFileSub}', limit,
-                                dateTakes, firstDate, lastDate, noCull)
-            # Add submosaic to list of threads
+            if not flags['noReprocess']:
+                writeInputFileQ(f'{outDir}/pieces/{inputSubFile}',
+                                xdim, ydim, dataTakes, flags)
+            # Setup thread for this sector
             threads.append(threading.Thread(target=runSubMosaic,
-                                            args=[outDir, inFileSub,
-                                                  outFileSub, baseFlags,
-                                                  firstDate, lastDate,
-                                                  lsCulledFile, dem, stdout,
-                                                  stderr]))
-            nl += 1
-        # add the list of pieces and corresp geodat to dict index by quad name
-        stdout = open(f'{outDir}/io/{quadName}.stdout', 'w')
-        stderr = open(f'{outDir}/io/{quadName}.stderr', 'w')
-        outputRegions.update({quadName: [outPieces, geodat, stdout, stderr]})
-    return threads, outputRegions
+                                            args=[outDir,
+                                                  inputSubFile,
+                                                  outFileSub,
+                                                  template['baseFlags'],
+                                                  flags['firstdate'],
+                                                  flags['lastdate'],
+                                                  lsCulledFile,
+                                                  regionDefs.dem(),
+                                                  stdout,
+                                                  stderr]
+                                            )
+                           )
+            gd = u.geodat(x0=xdim['xll'] * 0.001, y0=ydim['yll'] * 0.001,
+                          dx=xdim['dx'], dy=ydim['dy'],
+                          xs=xdim['sx'], ys=ydim['sy'],
+                          verbose=False, wkt=wkt)
+            geoPieces.append(gd)
+
+    stdout = open(f'{outDir}/io/All.stdout', 'w')
+    stderr = open(f'{outDir}/io/All.stderr', 'w')
+
+    return threads,  outPieces, geoPieces, stdouts, stderrs
 
 # ----------------------------------------------------------------------------
 #  main
@@ -1356,109 +1259,88 @@ def main():
     global regionID
     #
     # get command line args
-    maxThreads = 16
+    maxThreads = 24
     interpSize = 50
-    baseFlags, inputFile, lsFile, firstDate, lastDate, noTSX,\
-        outputMaskTemplate, shelfMask, noReprocess, cloudOptimize, noCull \
-        = processQArg(sys.argv)
+    #
+    print('\nTemplate')
+    template, flags, regionDefs = processQArgs()
+    for key in template:
+        print(f'{key}: {template[key]}')
+    print('\nFlags')
+    for key in flags:
+        print(f'{key}: {flags[key]}')
+    #
     # setup global defs
-    regionDefs = s.defaultRegionDefs(iceSheetRegion,
-                                     regionFile=iceSheetRegionFile)
-    projWin(iceSheetRegion)
-    if iceSheetRegion == 'amundsen':
-        dem = defaultAntarcticDEM
-    else:
-        dem = regionDefs.dem()
-    regionID = getRegionID()
-    #
-    # Setup template
-    if iceSheetRegionFile is None:
-        outputMaskTemplate = \
-            f'/Users/ian/maskTemplates/{iceSheetRegion}Output.shp'
-    else:
-        outputMaskTemplate = readCustomFile(key='maskTemplate')
-    #
-    if len(shelfMask) > 1:
-        baseFlags += f' -shelfMask {shelfMask}'
-    #
-    # grab quadrant info (hardwired for now)
-    quadNames, quadrants = setupQuadrants()
-    print(quadrants, quadNames)
+    regionID = template['regionID']
     # Make output directory
-    outDir = f'Vel-{firstDate.strftime("%Y-%m-%d")}.' \
-        f'{lastDate.strftime("%Y-%m-%d")}'
+    outDir = f'Vel-{flags["firstdate"].strftime("%Y-%m-%d")}.' \
+        f'{flags["lastdate"].strftime("%Y-%m-%d")}'
     #
     # make subdirectories, set up output mask (generic or specific)
-    outputMaskShape = mkQDirs(outDir, outputMaskTemplate)
+    outputMaskShape = mkQDirs(outDir, template['outputMask'])
     #
     # process landsat list (filter by date)
     lsCulledFile = None
-    if lsFile is not None:
-        lsCulledFile = processLsList(lsFile, firstDate, lastDate, outDir,
-                                     noReprocess=noReprocess)
-        #
-        # parse source list of data takes
-    dateTakes = []
-    if not noReprocess:
-        dateTakes = processInputFileQ(inputFile, noTSX)
+    if template['lsFile'] is not None:
+        lsCulledFile = processLsList(template['lsFile'], flags['firstdate'],
+                                     flags['lastdate'], outDir,
+                                     noReprocess=flags['noReprocess'])
     #
-    # Loop over each piece and do the relevant processing (threads)
-    # and region info (outputRegions)
-    threads, outputRegions = processQuadrants(quadNames, quadrants, outDir,
-                                              dateTakes, firstDate, lastDate,
-                                              baseFlags, lsCulledFile, dem,
-                                              noCull,
-                                              noReprocess=noReprocess)
+    # parse source list of data takes
+    dataTakes = []
+    if not flags['noReprocess']:
+        dataTakes = processInputFileQ(template['inputFile'], flags['noTSX'])
+        #
+    threads, piecesFiles, piecesGeodats, stdouts, stderrs = \
+        processSectors(template, flags, outDir, dataTakes, lsCulledFile)
     #
     # Run threads if noReprocess=False
-    if not noReprocess:
-        u.runMyThreads(threads, maxThreads, 'quadrant vel')
+    if not flags['noReprocess']:
+        u.runMyThreads(threads, maxThreads, 'sector vel')
     #
     # Combine submosaics
-    if True:  # Debug - set false to turn off these steps
-        assembleMosiacs(quadNames, outputRegions, outDir, baseFlags)
+    if True:  # Debug: set false to bypass
+        #
         # Mask data
-        maskMosaics(quadNames, outputRegions, outDir, outputMaskShape,
-                    baseFlags)
+        maskMosaics(piecesFiles, piecesGeodats, outDir, outputMaskShape,
+                    template['baseFlags'])
         #
         # Interpolate mosaics
-        interpMosiacs(quadNames, outputRegions, outDir, interpSize, baseFlags)
+        interpMosiacs(piecesFiles, piecesGeodats, outDir, interpSize,
+                      template['baseFlags'], stdouts, stderrs)
         #
         # Interpolate tiffs
-        writeQTiffs(quadNames, outDir, baseFlags)
+        writeQTiffs(piecesFiles, outDir, template['baseFlags'])
         #
         # makevrts
-        makeQVRTSs(quadNames, outDir, baseFlags)
+        makeQVRTSs(piecesFiles, outDir, template)
         #
-        # makeshapes (meta files with frame locations)
-        makeShapeOutputs(outDir, firstDate, lastDate)
-        #
-        # make preview map
-    makeLogMap(outDir, quadNames)
+    # makeshapes (meta files with frame locations)
+    makeShapeOutputs(outDir, flags['firstdate'], flags['lastdate'])
     # make final output
-    shapeFileNames = makeFinalOutput(outDir, quadNames, cloudOptimize,
-                                     firstDate, lastDate)
+    shapeFileNames = makeFinalOutput(outDir, template, flags)
     #
     sTypes = SatTypes(outDir, shapeFileNames)
-    print(sTypes)
     #
     preMetData = []
-    preMetData = populatePremet(preMetData, firstDate, lastDate,
+    preMetData = populatePremet(preMetData,
+                                flags['firstdate'], flags['lastdate'],
                                 validPlatforms=sTypes)
     preMetFiles = makePremets(preMetData, outDir, sTypes)
     #
     for shapeNameKey in shapeFileNames:
-        print(shapeNameKey, shapeFileNames)
+        # print(shapeNameKey, shapeFileNames)
         if shapeFileNames[shapeNameKey] is not None:
             makeSpatial(outDir,
-                        shapeFileNames[shapeNameKey].replace('shp', 'spo'))
+                        shapeFileNames[shapeNameKey].replace('shp', 'spo'),
+                        template)
             makeShapePremet(outDir, shapeFileNames[shapeNameKey], shapeNameKey,
-                            sTypes, firstDate, lastDate)
+                            sTypes, flags['firstdate'], flags['lastdate'])
     #
     for preMetFile in preMetFiles:
         if preMetFile is not None:
             print(preMetFile)
-            makeSpatial(outDir, preMetFile.replace('premet', 'spo'))
+            makeSpatial(outDir, preMetFile.replace('premet', 'spo'), template)
 
 
 main()

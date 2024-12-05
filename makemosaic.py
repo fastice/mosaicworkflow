@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
 Created on Mon Feb  3 08:45:12 2020
@@ -25,64 +25,97 @@ def makemosaicArgs():
     defaultEnd = date.today().strftime('%Y-%m-%d')
     parser.add_argument('--lastdate', type=str, default=defaultEnd,
                         help=f'Use central dates <= lastdate [{defaultEnd}]')
+    parser.add_argument('--inputFile', type=str, default=None,
+                        help='Input file for radar data [from mosaicTemplate]')
     parser.add_argument('--interval', type=str,
                         choices=['s1cycle', 's1-12day', 'monthly', 'quarterly',
-                                 'annual', 'multiYear'], default='monthly',
+                                 'annual', 'multiYear', 'quarterlyJFM'],
+                        default='monthly',
                         help='time interval spanned')
-    parser.add_argument('--region', type=str,
-                        choices=['greenland', 'amundsen', 'taku'],
-                        default='greenland',
-                        help='region code if not customRegion')
-    parser.add_argument('--customRegion', type=str,
-                        default=None,
-                        help='yml file with custom region specification')
+    # parser.add_argument('--region', type=str,
+    #                     choices=['greenland', 'amundsen', 'taku', 'custom'],
+    #                     default='greenland',
+    #                     help='region code if not customRegion')
     parser.add_argument('--noReprocess', action='store_true', default=False,
                         help='Just reformat data')
     parser.add_argument('--noLandsat', action='store_true', default=False,
                         help='Do not include landsat')
+    parser.add_argument('--landsatPath', type=str,
+                        default=None,
+                        help='Path to directory with lists of landsat scenes')
     parser.add_argument('--LSFitType', type=str,
                         choices=['custom.mask', 'custom', 'static',
                                  'static.mask'],
                         default='custom.mask',
                         help='Landsat fit type')
-    parser.add_argument('--mask', type=str, default=None,
-                        help='Uses non-default mask')
+    parser.add_argument('--mosaicMask', type=str, default=None,
+                        help='Mask applied by mosaic3d')
+    parser.add_argument('--outputMask', type=str, default=None,
+                        help='Shapefile for final output mask')
     parser.add_argument('--baseFlags', type=str, default=None,
                         help='Override default flags for the mosaicker')
     parser.add_argument('--keepFast', action='store_true', default=False,
                         help='Do not mask fast tracked areas to keep melange')
     parser.add_argument('--check', action='store_true', default=False,
                         help='Setup command,  check masks, but do not run')
+    parser.add_argument('--template', type=str, default='mosaic.template.yaml',
+                        help='template that defines mosaic')
+    parser.add_argument('--mosaicsSetupFile', type=str,
+                        default='mosaicsSetup.yaml',
+                        help='yaml with seasonal and mask information')
+    #
     args = parser.parse_args()
+    #
+    mosaicsSetup = mosf.readYaml(args.mosaicsSetupFile, returnEmpty=True)
+    if args.landsatPath is not None or 'landsatPath' not in mosaicsSetup:
+        mosaicsSetup['landsatPath'] = args.landsatPath
+    if args.mosaicMask is not None or 'mosaicMask' not in mosaicsSetup:
+        mosaicsSetup['mosaicMask'] = args.mosaicMask
+    # OVerride with commandline
+    inputFile = None
+    if args.inputFile is not None:
+        inputFile = args.inputFile
+    # else default if not defined in file
     # multiYear dates not adjusted
     firstDate = adjustFirstDate(datetime.strptime(args.firstdate, "%Y-%m-%d"),
-                                args.interval, args.region)
+                                args.interval, mosaicsSetup['seasonData'])
     endDate = datetime.strptime(args.lastdate, "%Y-%m-%d")
-    if args.customRegion is not None:
-        args.region = 'custom'
     myArgs = {'firstDate': firstDate, 'lastDate': endDate,
+              'mosaicsSetup': mosaicsSetup,
               'interval': args.interval, 'noReprocess': args.noReprocess,
-              'check': args.check, 'region': args.region,
-              'customRegion': args.customRegion, 'mask': args.mask,
+              'inputFile': inputFile,
+              'landsatPath': mosaicsSetup['landsatPath'],
+              'check': args.check, 'template': args.template,
+              'outputMask': args.outputMask,
               'keepFast': args.keepFast, 'baseFlags': args.baseFlags,
               'noLandsat': args.noLandsat, 'fitType': args.LSFitType}
     return myArgs
 
 
-def adjustFirstDate(firstdate, interval, region):
+def adjustFirstDate(firstdate, interval, seasonData):
     ''' adjust first date to match predefined ranges for interval '''
     if 'multiYear' in interval:
         return firstdate
+    #
+
     firstdateOrig = firstdate
-    quarterlyDates = {'greenland': [0, 12, 12, 3, 3, 3, 6, 6, 6, 9, 9, 9, 12],
-                      'amundsen': [0, 1, 1, 1, 4, 4, 4, 7, 7, 7, 10, 10, 10],
-                      'taku': [0, 1, 1, 1, 4, 4, 4, 7, 7, 7, 10, 10, 10],
-                      'custom': [0, 1, 1, 1, 4, 4, 4, 7, 7, 7, 10, 10, 10]}
-    quarterlyMonths = {'greenland': 2, 'amundsen': 0, 'taku': 0}
-    annualDates = {'greenland': datetime(firstdate.year, 12, 1),
-                   'amundsen': datetime(firstdate.year, 1, 1),
-                   'custom': datetime(firstdate.year, 1, 1),
-                   'taku': datetime(firstdate.year, 1, 1)}
+    # if region == 'quarterlyJFM':
+    #     customDates = [0, 1, 1, 1, 4, 4, 4, 7, 7, 7, 10, 10, 10]
+    #     customQuarterlyMonth = 2
+    #     interval = 'quarterly'
+    # else:
+    #     customDates = [0, 12, 12, 3, 3, 3, 6, 6, 6, 9, 9, 9, 12]
+    #     customQuarterlyMonth = 0
+    # quarterlyDates ={'greenland': [0, 12, 12, 3, 3, 3, 6, 6, 6, 9, 9, 9, 12],
+    #                   'amundsen': [0, 1, 1, 1, 4, 4, 4, 7, 7, 7, 10, 10, 10],
+    #                   'taku': [0, 12, 12, 3, 3, 3, 6, 6, 6, 9, 9, 9, 12],
+    #                   'custom': customDates}
+    # quarterlyMonths = {'greenland': 2, 'amundsen': 0, 'taku': 2,
+    #                    'custom': customQuarterlyMonth}
+    # annualDates = {'greenland': datetime(firstdate.year, 12, 1),
+    #                'amundsen': datetime(firstdate.year, 1, 1),
+    #                'custom': datetime(firstdate.year, 1, 1),
+    #                'taku': datetime(firstdate.year, 1, 1)}
     #
     if interval == 's1cycle' or interval == 's1-12day':
         if interval == 's1-12day':
@@ -99,13 +132,14 @@ def adjustFirstDate(firstdate, interval, region):
         firstdate = firstdate.replace(day=1)
     elif interval == 'quarterly':
         # start at beginning of quarter that contains firstdate
-        month = quarterlyDates[region][firstdate.month]
+        month = seasonData['quarterlyDates'][firstdate.month]
         year = firstdate.year
-        if firstdate.month <= quarterlyMonths[region]:
+        if firstdate.month <= seasonData['quarterlyMonth']:
             year = year-1
+            month = seasonData['quarterlyMonth'] + 10
         firstdate = datetime(year, month, 1)
     elif interval == 'annual':
-        firstdate = annualDates[region]
+        firstdate = datetime(firstdate.year, seasonData['annualFirstMonth'], 1)
     #
     # warning that date has been ajusted
     if firstdate != firstdateOrig:
@@ -117,10 +151,10 @@ def adjustFirstDate(firstdate, interval, region):
     return firstdate
 
 
-def getLists(fitType='custom.mask'):
+def getLists(landsatPath, fitType='custom.mask'):
     ''' get mask and list files, along with masks '''
-    myPath = '/Volumes/insar7/ian/LANDSAT/Greenland'
-    listFiles = u.dols(f'ls {myPath}/listfiles/Listfile.*.{fitType}')
+    # myPath = '/Volumes/insar7/ian/LANDSAT/Greenland'
+    listFiles = u.dols(f'ls {landsatPath}/listfiles/Listfile.*.{fitType}')
     return listFiles
 
 
@@ -136,7 +170,8 @@ def incrementDate(myDate, interval):
     if interval == 's1-12day':
         return myDate + timedelta(days=12)
     # All other intervales
-    dT = {'monthly': 32, 'quarterly': 93, 'annual': 367}[interval]
+    dT = {'monthly': 32, 'quarterly': 93, 'quarterlyJFM': 93,
+          'annual': 367}[interval]
     myDate = myDate + timedelta(days=dT)
     # force to start of month
     myDate = myDate.replace(day=1)
@@ -182,89 +217,90 @@ def createMergedList(listFiles, firstDate, lastDate):
     return mergedList
 
 
-def getNewMask(interval, firstDate, lastDate):
-    # template for type
-    maskPath = '/Users/ian/greenlandmask'
-    maskPath = {'quarterly': f'{maskPath}/quartermasks/greenlandmask20YYSS',
-                'monthly': f'{maskPath}/output20YY/greenlandmaskSS20YY',
-                's1cycle': f'{maskPath}/output20YY/greenlandmaskSS20YY',
-                's1-12day': f'{maskPath}/output20YY/greenlandmaskSS20YY',
-                'annual':
-                    f'{maskPath}/annualmasks/greenlandmask20YYA',
-                'multiYear':
-                    f'{maskPath}/annualmasks/greenlandmask20YYA'}[interval]
-    # ids for a given interval type
-    whichMask = {'quarterly': ['Q1', 'Q1', 'Q2', 'Q2', 'Q2', 'Q3', 'Q3', 'Q3',
-                               'Q4', 'Q4', 'Q4', 'Q1'],
-                 'monthly': ['lw', 'lw', 'lw', 'sp', 'sp', 'ms', 'ms', 'ms',
-                             'ls', 'ls', 'ew', 'ew'],
-                 's1cycle': ['lw', 'lw', 'lw', 'sp', 'sp', 'ms', 'ms', 'ms',
-                             'ls', 'ls', 'ew', 'ew'],
-                 's1-12day': ['lw', 'lw', 'lw', 'sp', 'sp', 'ms', 'ms', 'ms',
-                              'ls', 'ls', 'ew', 'ew'],
-                 'annual': ['A']*12,
-                 'multiYear': ['A']*12}[interval]
+def getNewMask(interval, firstDate, lastDate, mosaicsSetup):
+    '''
+    Fill in mask templates with the season and year
+    '''
+    maskPath = mosaicsSetup['intervalMasks'][interval]
+    whichMask = mosaicsSetup['whichMask'][interval]
     #
-    month = (firstDate+(lastDate-firstDate)*0.5).month
-    year = (firstDate+(lastDate-firstDate)*0.5).year
+    month = (firstDate + (lastDate - firstDate) * 0.5).month
+    year = (firstDate + (lastDate - firstDate) * 0.5).year
     # update mask template with relevant info
+    print(maskPath)
     maskFile = maskPath.replace('YY', f'{year-2000}').replace(
         'SS', whichMask[month-1])
     #
     return maskFile
 
 
-def getGreenlandMask(interval, firstDate, lastDate, keepFast):
+def getMosaicMask(mosaicsSetup, interval, firstDate, lastDate, keepFast):
     ''' Return appropriate mask file '''
-    if keepFast:  # This uses the melange mask
-        return '/Users/ian/greenlandmask/MelangeMask/melangemask'
-    maskPath = '/Users/ian/greenlandmask'
-    mqmasks = {2014: f'{maskPath}/Winter201415/greenlandmask201415',
-               2015: f'{maskPath}/Winter201516/greenlandmask201516',
-               2016: f'{maskPath}/Winter201617/greenlandmask201617'}
-    annmasks = {2015: f'{maskPath}/annualmasks/greenlandmask2015A',
-                2016: f'{maskPath}/annualmasks/greenlandmask2016A'}
-    oldMasks = {'s1cycle': mqmasks, 's1-12day': mqmasks, 'monthly': mqmasks,
-                'quarterly': mqmasks, 'annual': annmasks}
-    #
-    if firstDate < datetime(2016, 12, 1):
-        if interval in ['s1cycle', 's1-12day', 'quarterly', 'monthly']:
-            myYear = max((firstDate-timedelta(days=182)).year, 2014)
-        else:
-            myYear = (firstDate+timedelta(days=182)).year
-        maskFile = oldMasks[interval][myYear]
-    else:
-        maskFile = getNewMask(interval, firstDate, lastDate)
+    if keepFast:
+        print('keepFast flag set so no mask applied')
+        return None
+    # Use explicit version if given
+    if mosaicsSetup['mosaicMask'] is not None:
+        return mosaicsSetup['mosaicMask']
+    # Select seasonal mask
+    if 'intervalMasks' not in mosaicsSetup:
+        return None
+    maskFile = getNewMask(interval, firstDate, lastDate, mosaicsSetup)
     if not os.path.exists(maskFile):
-        u.myerror(f'getMask: maskfile {maskFile} does not exist')
+        u.myerror(f'getMosaicMask: maskfile {maskFile} does not exist')
     print(maskFile)
     return maskFile
 
 
-def makeCommand(firstDate, lastDate, noReprocess, listFile, maskFile, region,
-                customRegion, interval, keepFast, baseFlags):
+def makeCommand(firstDate, lastDate, mergedList, mosaicMaskFile, myArgs):
     ''' setup and return command '''
     #
-    if customRegion is not None:
-        regionUsed = f'customRegion={customRegion}'
-    else:
-        regionUsed = region
-    command = f'setupquarters.py -{regionUsed} -firstdate='
-    command += firstDate.strftime('%Y-%m-%d')
-    command += ['', ' -noReprocess '][noReprocess]
-    command += f' -lastdate={lastDate.strftime("%Y-%m-%d")} '
-    if baseFlags is not None:
-        command += f' -baseFlags="{baseFlags}" '
-    if keepFast:
-        command += ' -noCull '
-    if region == 'greenland' and interval != 's1cycle' and \
-            listFile is not None:
-        command += f'-lsFile={listFile}'
-    if interval == 's1cycle' or interval == 's1-12day':
-        command += ' -noTSX'
-    command += ' -inputFile=track-all/inputFile '
-    if maskFile is not None:
-        command += f'-shelfMask={maskFile}'
+    outputMaskArg, templateArg, lsArg, baseFlagsArg, keepFastFlag, \
+        mosaicMaskArg, noReprocessFlag, noTSXFlag = [''] * 8
+    #
+    noReprocessFlag = {False: '', True: '--noReprocess'}[myArgs["noReprocess"]]
+    #
+    # output mask
+    if myArgs['outputMask'] is not None:
+        outputMaskArg = '--outputMask {myArgs["outputMask"]}'
+    #
+    # mosaicMask
+    if mosaicMaskFile is not None:
+        mosaicMaskArg = f'--mosaicMask {mosaicMaskFile} '
+    #
+    # template file
+    if myArgs["template"] is not None:
+        templateArg = f'--template {myArgs["template"]} '
+    #
+    # radar inputs
+    inputFileArg = ' '
+    if myArgs['outputMask'] is not None:
+        inputFileArg = f' --inputFile {myArgs["inputFile"]}'
+    #
+    # landsat inputs
+    if mergedList is not None:
+        lsArg = f'--lsFile {mergedList} '
+    #
+    # baseFlags
+    if myArgs["baseFlags"] is not None:
+        baseFlagsArg = f'--baseFlags \"{myArgs["baseFlags"]}\" '
+    # keepFast uses no cull for melanges
+    if myArgs["keepFast"]:
+        keepFastFlag = '--noCull '
+    # TSX excluded from single sycle data
+    if myArgs["interval"] == 's1cycle' or myArgs["interval"] == 's1-12day':
+        noTSXFlag = ' --noTSX'
+
+    command = f'setupquarters.py ' \
+        f'{templateArg} ' \
+        f'--firstdate {firstDate.strftime("%Y-%m-%d")} ' \
+        f' --lastdate {lastDate.strftime("%Y-%m-%d")} ' \
+        f'{noReprocessFlag} {keepFastFlag} {noTSXFlag} ' \
+        f'{baseFlagsArg}' \
+        f'{outputMaskArg} '  \
+        f'{mosaicMaskArg} ' \
+        f'{inputFileArg} {lsArg} '
+
     print(command)
     return command
 
@@ -274,16 +310,14 @@ def main():
     # get args
     myArgs = makemosaicArgs()
     #
-    print(myArgs['noLandsat'])
-    if myArgs['region'] in ['greenland'] and not myArgs['noLandsat']:
-        listFiles = getLists(fitType=myArgs['fitType'])
+    if myArgs['mosaicsSetup']['landsatPath'] is not None and \
+            not myArgs['noLandsat']:
+        listFiles = getLists(myArgs['landsatPath'], fitType=myArgs['fitType'])
         mergedList = createMergedList(listFiles, myArgs['firstDate'],
                                       myArgs['lastDate'])
     else:
         mergedList = None
-    print('Date range', myArgs['firstDate'], myArgs['lastDate'])
-    print(myArgs)
-    # exit()
+    print(f'mergedList = {mergedList}')
     #
     currentFirstDate = myArgs['firstDate']
     currentLastDate, year = findLastDate(currentFirstDate, myArgs)
@@ -291,18 +325,15 @@ def main():
     # loop to produce products as defined by date range
     while currentLastDate <= myArgs['lastDate']:
         # get mask
-        if myArgs['region'] == 'greenland' and myArgs['mask'] is None:
-            maskFile = getGreenlandMask(myArgs['interval'], currentFirstDate,
-                                        currentLastDate, myArgs['keepFast'])
-        else:
-            maskFile = myArgs['mask']
-        # print(currentFirstDate, currentLastDate, year, maskFile)
+        mosaicMaskFile = getMosaicMask(myArgs['mosaicsSetup'],
+                                       myArgs['interval'],
+                                       currentFirstDate,
+                                       currentLastDate,
+                                       myArgs['keepFast'])
         # setup command
-        command = makeCommand(currentFirstDate, currentLastDate,
-                              myArgs['noReprocess'], mergedList, maskFile,
-                              myArgs['region'], myArgs['customRegion'],
-                              myArgs['interval'],
-                              myArgs['keepFast'], myArgs['baseFlags'])
+        command = makeCommand(currentFirstDate, currentLastDate, mergedList,
+                              mosaicMaskFile, myArgs)
+      
         if not myArgs['check']:
             call(command, shell=True, executable='/bin/csh')
         # update dates

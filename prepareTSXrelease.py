@@ -38,7 +38,7 @@ def setupCleanTSXArgs():
     parser.add_argument('--sensor', type=str, default='TSX',
                         choices=['TSX', 'CSK'], help='Sensor name')
     parser.add_argument('--region', type=str, default='greenland',
-                        choices=['greenland', 'taku'], help='Sensor name')
+                        choices=['greenland', 'taku', 'Columbia'], help='Sensor name')
     parser.add_argument('releaseDir', type=str, nargs=1,
                         help='Name of release dir for this release')
     #
@@ -55,8 +55,9 @@ def setupCleanTSXArgs():
     usePrompt = not args.noPrompt
     #
     pwd = os.getcwd()
-    if 'release' not in pwd.split('/'):
-        u.myerror(f'Error for cwd {pwd}: Much run in release dir')
+    # make sure "release" is in name (e.g., release, testrelease)
+    if 'release' not in pwd.split('/')[-1]:
+        u.myerror(f'Error for cwd {pwd}: Must run in release dir')
     if args.sensor not in pwd:
         u.myerror(f'Error for sensor {args.sensor} not path name: {pwd}')
     #
@@ -260,6 +261,8 @@ def getBoxInfo(region):
         boxName = u.dols('ls -d *coast-*')[0]
     elif region == 'taku':
         boxName = u.dols('ls -d Alaska-*')[0]
+    elif region == 'Columbia':
+        boxName = u.dols('ls -d Alaska-*')[0]
     else:
         u.myerror(f'{region} not valid region')
     resFile = f'{boxName}/resolution'
@@ -274,9 +277,9 @@ def getBoxInfo(region):
         u.myerror(f'Missing resolution file for {boxName}')
 
     resP = [float(x) for x in resString.split()]
-    #
+    # make sure "release" is in name (e.g., release, testrelease)
     myParts = os.getcwd().split('/')
-    if myParts[-1] != 'release':
+    if 'release' not in myParts[-1]:
         u.myerror('must run in release directory')
     glacierID = myParts[-2]
     #
@@ -315,11 +318,15 @@ def getInputData(offDir):
 
 
 def makeRunOff(outDir, shelfMask, dem):
+    shelfMaskArg = ''
+    if shelfMask is not None:
+        shelfMaskArg = f' -shelfMask {shelfMask}'
+    #
     try:
         fp = open(f'{outDir}/runOff', 'w')
         print(f'#\nset DEM={dem}\n#', file=fp)
         print(f'mosaic3d -fl 20 -offsets -rOffsets -center -no3d -noVh '
-              f'-shelfMask {shelfMask} inputFile $DEM mosaicOffsets', file=fp)
+              f'{shelfMaskArg} inputFile $DEM mosaicOffsets', file=fp)
     except Exception:
         u.myerror(f'Problem making runOff in {outDir}')
 
@@ -496,7 +503,7 @@ def shelfMaskName(myDate, maskDict, glacierID, keepFast, region):
     ''' get the mask name '''
     #
     if region != 'greenland':
-        return s.defaultRegionDefs(region).mask()
+        return s.defaultRegionDefs(region).shelfMask()
     if keepFast:
         return '/Users/ian/greenlandmask/MelangeMask/melangemask'
     doy = myDate.timetuple().tm_yday
