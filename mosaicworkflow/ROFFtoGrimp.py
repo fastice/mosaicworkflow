@@ -51,6 +51,10 @@ def parseArgs():
     choices = [x for x in sarfunc.defaultRegionDefs(None).regionsDef]
     parser.add_argument('--region', type=str, choices=choices, default=None,
                         help='region [autodetect greenland or antarctica]')
+    parser.add_argument('-regionFile', '--regionFile', type=str,
+                        default=None, help='Yaml file with locations of '
+                        'velMap, DEM etc for simulating offsests [None]')
+    
     parser.add_argument('--correlationThresholds', type=float, nargs=3,
                         default=[0.07, 0.05, 0.025],
                         help='Correlation thresholds for discarding bad'
@@ -120,7 +124,7 @@ def parseArgs():
         params['stdout'], params['stderr'] = DEVNULL, DEVNULL
     #
     for param in ['correlationThresholds', 'region', 'interpThresh',
-                  'islandThresh', 'noMask', 'DEM', 'byteOrder']:
+                  'islandThresh', 'noMask', 'DEM', 'byteOrder', 'regionFile']:
         params[param] = getattr(args, param)
     # Assemble cull params
     params['cullParams'] = {}
@@ -194,7 +198,12 @@ def callSim(outputDir, baseName, params,
     See simulateOffsets for other paremeter definitions.
     '''
     byteOrderFlag = {'MSB': '', 'LSB': '-LSB'}[params['byteOrder']]
-    command = f'simoffsets.py -region={params["region"]} {byteOrderFlag} '
+    if params['regionFile'] is not None:
+        regionArg = f'-regionFile {params["regionFile"]}'
+    else:
+        regionArg = f'-region={params["region"]}'
+        
+    command = f'simoffsets {regionArg} {byteOrderFlag} '
     if params['DEM'] is not None:
         command += f'-dem={params["DEM"] } '
     if includeVel is False:
@@ -205,6 +214,7 @@ def callSim(outputDir, baseName, params,
     command += f'-geodatFile={outputDir}/{workingDir}/{geodat1} '
     geodat2 = os.path.basename(params["geo2"])
     command += f'-secondGeodatFile={outputDir}/{workingDir}/{geodat2} '
+    print(command)
     call(command, shell=True, executable='/bin/csh',
          stderr=stderr, stdout=stdout)
 
@@ -825,6 +835,7 @@ def main():
     # Simulate the offsets
     simulateOffsets(params["outputDir"], 'offsets', params,
                     stdout=params['stdout'], stderr=params['stderr'])
+
     #
     # Apply any mask files
     if not params['noMask']:

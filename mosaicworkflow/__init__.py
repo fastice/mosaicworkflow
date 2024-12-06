@@ -11,14 +11,6 @@ __all__ = ['makemosaic',
            'ROFFtoGrimp',
            'RUNWtoGrimp',
            'setupimagemosaic',
-           'setupquarters']
+           'setupquarters',
+           'simoffsets']
 
-
-
-# from mosaicworkflow.makeimagemosaics import main
-# from mosaicworkflow.makemosaic import main
-# from mosaicworkflow.prepareTSXrelease import main
-# from mosaicworkflow.ROFFtoGrimp import main
-# from mosaicworkflow.RUNWtoGrimp import main
-# from mosaicworkflow.setupimagemosaic import main
-# from mosaicworkflow.setupquarters import main
