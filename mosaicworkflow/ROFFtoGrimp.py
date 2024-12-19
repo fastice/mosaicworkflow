@@ -154,10 +154,7 @@ def findGeodat(params, geodat1, geodat2):
     '''
     try:
         if geodat1 is None:
-            print('here')
             tmp = glob.glob(f'{params["outputDir"]}/geodat*x*.geojson')
-            print(f'{params["outputDir"]}/geodat*x*.geojson')
-            print('Tmp ', tmp)
             nlr, nla, = os.path.basename(
                 tmp[0]).split('.')[0].split('geodat')[1].split('x')
             geodat1 = glob.glob(
