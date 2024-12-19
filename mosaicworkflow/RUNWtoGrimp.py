@@ -54,7 +54,7 @@ def parseArgs():
     args = parser.parse_args()
     #
     print(args.RUNW[0])
-    if not os.path.exists(args.RUNW[0]):
+    if not os.path.exists(args.RUNW[0]) and 's3' not in args.RUNW[0]:
         u.myerror(f'RUNW file {args.RUNW[0]} does not exist')
     #
     params = {}
