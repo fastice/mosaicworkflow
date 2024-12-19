@@ -162,6 +162,8 @@ def findGeodat(params, geodat1, geodat2):
         if geodat2 is None:
             geodat2 = geodat1.replace('.geojson', '.secondary.geojson')
     except Exception:
+        print(f'geodat1 {geodat1}')
+        print(f'geodat2 {geodat2}')
         u.myerror('Cannot find geodat files')
     params['geo1'] = geodat1
     params['geo2'] = geodat2
