@@ -54,7 +54,6 @@ def parseArgs():
     parser.add_argument('-regionFile', '--regionFile', type=str,
                         default=None, help='Yaml file with locations of '
                         'velMap, DEM etc for simulating offsests [None]')
-    
     parser.add_argument('--correlationThresholds', type=float, nargs=3,
                         default=[0.07, 0.05, 0.025],
                         help='Correlation thresholds for discarding bad'
@@ -156,7 +155,6 @@ def findGeodat(params, geodat1, geodat2):
     try:
         if geodat1 is None:
             tmp = glob.glob(f'{params["outputDir"]}/geodat*x*.geojson')
-            print(tmp)
             nlr, nla, = os.path.basename(
                 tmp[0]).split('.')[0].split('geodat')[1].split('x')
             geodat1 = glob.glob(
@@ -181,7 +179,7 @@ def setupGeodats(params):
     for key in ['geo1', 'geo2']:
         geodatFile = os.path.basename(params[key])
         geodatPath = os.path.dirname(params[key])
-        print(geodatPath)
+        # print(geodatPath)
         if not os.path.exists(f'{geodatPath}/workingDir/{geodatFile}'):
             call(f'cd {geodatPath}/workingDir; ln -s ../{geodatFile} .',
                  shell=True)
@@ -202,7 +200,6 @@ def callSim(outputDir, baseName, params,
         regionArg = f'-regionFile {params["regionFile"]}'
     else:
         regionArg = f'-region={params["region"]}'
-        
     command = f'simoffsets {regionArg} {byteOrderFlag} '
     if params['DEM'] is not None:
         command += f'-dem={params["DEM"] } '
@@ -214,7 +211,6 @@ def callSim(outputDir, baseName, params,
     command += f'-geodatFile={outputDir}/{workingDir}/{geodat1} '
     geodat2 = os.path.basename(params["geo2"])
     command += f'-secondGeodatFile={outputDir}/{workingDir}/{geodat2} '
-    print(command)
     call(command, shell=True, executable='/bin/csh',
          stderr=stderr, stdout=stdout)
 
@@ -738,12 +734,12 @@ def writeVRTs(myROFF, ROFFPath, params):
 
     Parameters
     ----------
-    myROFF : TYPE
-        DESCRIPTION.
-    ROFFPath : TYPE
-        DESCRIPTION.
-    params : TYPE
-        DESCRIPTION.
+    myROFF : nisarROFFHDF
+        Offset.
+    ROFFPath : str
+        Path to ROFF.
+    params : dict
+        Dictionary of params.
 
     Returns
     -------
@@ -774,7 +770,6 @@ def writeVRTs(myROFF, ROFFPath, params):
     filenames = ['azimuth.offsets.vrt', 'range.offsets.vrt',
                  'offsets.range-azimuth.vrt']
     print(metaData)
-    #u.myerror('stop')
     for filename, files, descriptions in \
         zip(filenames,
             [azFiles, rgFiles, rgFiles + azFiles],
@@ -808,7 +803,6 @@ def main():
     # Parse command line args
     ROFF, ROFFPath, params = parseArgs()
     print(params)
-    #sys.exit()
     #
     # Setup ROFF object and open HDF file
     myROFF = nisarhdf.nisarROFFHDF()
@@ -835,7 +829,6 @@ def main():
     # Simulate the offsets
     simulateOffsets(params["outputDir"], 'offsets', params,
                     stdout=params['stdout'], stderr=params['stderr'])
-
     #
     # Apply any mask files
     if not params['noMask']:
@@ -859,6 +852,9 @@ def main():
     #
     # Interpolate the offset layers
     interpOffsets(params["outputDir"], 'offsets',
+                  ratThresh=1,
+                  thresh=params['interpThresh'],
+                  islandThresh=params['islandThresh'],
                   byteOrder=params['byteOrder'],
                   stdout=params['stdout'], stderr=params['stderr'])
     #
@@ -871,4 +867,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

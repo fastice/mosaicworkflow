@@ -163,9 +163,17 @@ def resolveRegion(args):
 
 
 def checkFiles(myRegion, secondDir, args, fp):
-    if myRegion.velMap() is not None:
-        print('velMap= ', myRegion.velMap())
-        if not os.path.exists(myRegion.velMap()+'.vx'):
+    if myRegion.velMap() is not None and args.noVel == False:
+        print('velMap = ', myRegion.velMap())
+        if '.vrt' in myRegion.velMap() or '.tif' in myRegion.velMap():
+            velFileVx = \
+                myRegion.velMap().replace('*', 'vx').replace('vv', 'vx')
+            velFileVy = velFileVx.replace('vx', 'vy')
+        else:
+            velFileVx = f'{myRegion.velMap()}.vx'
+            velFileVy = f'{myRegion.velMap()}.vy'
+        if not os.path.exists(velFileVx) or not os.path.exists(velFileVy):
+            print(velFileVx, velFileVy)
             printError('velMap not found: ', myRegion.velMap(), fp)
     # check dem
     print('dem = ', myRegion.dem())
@@ -503,6 +511,7 @@ def runSim(geodatFile, offsetsDat, dem, maskInputFile, syncDat,
     offsetsRoot = offsetsDat.replace('.dat', '').replace('.vrt', '')
     command = f'siminsar {byteOrderFlag} -center -toLL {offsetsDat} -mask ' \
         f'-xyDEM {dem}  {maskInputFile} {geodatFile} {offsetsRoot}'
+    print(command)
     call(command, shell=True,  executable='/bin/csh')
 
 
