@@ -103,7 +103,7 @@ def parseArgs():
     choices = [x for x in sarfunc.defaultRegionDefs(None).regionsDef]
 
     args = parser.parse_args()
-    if not os.path.exists(args.ROFF[0]):
+    if not os.path.exists(args.ROFF[0]) and 's3' not in args.ROFF[0]:
         u.myerror(f'ROFF file {args.ROFF[0]} does not exist')
     ROFFPath = os.path.dirname(args.ROFF[0])
     if len(ROFFPath) == 0:
