@@ -211,8 +211,8 @@ def callSim(outputDir, baseName, params,
     command += f'-geodatFile={outputDir}/{workingDir}/{geodat1} '
     geodat2 = os.path.basename(params["geo2"])
     command += f'-secondGeodatFile={outputDir}/{workingDir}/{geodat2} '
-    call(command, shell=True, executable='/bin/csh',
-         stderr=stderr, stdout=stdout)
+    # , executable='/bin/csh'
+    call(command, shell=True, stderr=stderr, stdout=stdout)
 
 
 def simulateOffsets(outputDir, baseName, params,
@@ -281,8 +281,8 @@ def runCull(outputDir, baseLayerName, boxSize=9, maxA=3, maxR=3, nGood=17,
     command += f'{outputDir}/{workingDir}/{baseLayerName}.cull'
 
     # Run command
-    call(command, shell=True, executable='/bin/csh', stderr=stderr,
-         stdout=stdout)
+    # , executable='/bin/csh'
+    call(command, shell=True, stderr=stderr, stdout=stdout)
 
 
 def cullst(outputDir, baseName, boxSize=7, maxA=3, maxR=3, nGood=10,
@@ -480,8 +480,8 @@ def runInterp(outputDir, inputFile, outputFile, nr, na, ratThresh=1,
         f' > {outputDir}/{workingDir}/{outputFile}'
     #
     # Run command
-    call(command, shell=True, executable='/bin/csh', stderr=stderr,
-         stdout=stdout)
+    # , executable='/bin/csh'
+    call(command, shell=True, stderr=stderr, stdout=stdout)
 
 
 def interpOffsets(outputDir, baseName, ratThresh=1, thresh=20, islandThresh=20,

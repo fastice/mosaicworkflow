@@ -333,9 +333,9 @@ def main():
         # setup command
         command = makeCommand(currentFirstDate, currentLastDate, mergedList,
                               mosaicMaskFile, myArgs)
-      
+        #
         if not myArgs['check']:
-            call(command, shell=True, executable='/bin/csh')
+            call(command, shell=True)  # , executable='/bin/csh')
         # update dates
         if 'multiYear' in myArgs['interval']:
             break  # multi Year one off product
@@ -345,4 +345,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

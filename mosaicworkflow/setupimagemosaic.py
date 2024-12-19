@@ -120,8 +120,8 @@ def runGeoMosaic(inputFile, date1, date2, dem, smoothL, calFlag, srsInfo):
     with open(stdoutFile, 'w') as stdout:
         with open(stderrFile, 'w') as stderr:
             print(command, file=stdout)
-            call(command, shell=True, executable='/bin/csh', stdout=stdout,
-                 stderr=stderr)
+            # executable='/bin/csh',
+            call(command, shell=True, stdout=stdout, stderr=stderr)
             time.sleep(1)  # Add a delay to see if this fixes random seg faults
             for suffix in suffixes:
                 fpImageToTiff(f'{outDir}/{outFile}.{suffix}',
@@ -370,7 +370,7 @@ def mergeImageTiles(prodDir, prefix, date1, date2, posting, corners,
         command = f'makeimageshapefile.py inputFile.0.0 ' \
             f'../release/{shapeFileName}'
         print(command)
-        call(command, shell=True, executable='/bin/csh')
+        call(command, shell=True)  # , executable='/bin/csh')
         satTypes = imageSatTypes(f'{shapeFileName}.shp')
         makeImageSpatial(corners, '..', f'{shapeFileName}.spo')
         # added Aug 20 2020
@@ -386,7 +386,7 @@ def mergeImageTiles(prodDir, prefix, date1, date2, posting, corners,
                 command = f'gdalbuildvrt -vrtnodata {noData} '\
                     f'{prodDir}.{suffix}.vrt *{suffix}.tif'
                 print(command)
-                call(command, shell=True, executable='/bin/csh')
+                call(command, shell=True)  # , executable='/bin/csh')
                 # create the cloud optimized geo
                 tifName = \
                     prodName.replace("*", suffix).replace("RES", str(posting))
@@ -403,13 +403,13 @@ def mergeImageTiles(prodDir, prefix, date1, date2, posting, corners,
                     f'{origVrt} {newTif}'
                 # print(command)
                 # u.myerror('debug')
-                call(command, shell=True, executable='/bin/csh')
+                call(command, shell=True)  # , executable='/bin/csh')
                 #
                 # make quicklook
                 call('gdal_translate -co "QUALITY=99" -scale -of JPEG -r '
                      f'average -tr {jpgRes} {jpgRes} '
                      f'../release/{tifName}.tif ../release/{jpgName}.jpg',
-                     shell=True, executable='/bin/csh')
+                     shell=True)  # , executable='/bin/csh')
     except Exception:
         u.myerror('mergeImageTiles: Problem creating final mosaic')
     #
@@ -476,9 +476,9 @@ def checkDateRange(myArgs, sarDB):
 
     '''
     print(type(myArgs['firstDate']),  type(sarDB.minDate))
-    print(myArgs['firstDate'],  sarDB.minDate )
+    print(myArgs['firstDate'],  sarDB.minDate)
     print(myArgs['lastDate'], sarDB.maxDate)
-    print(myArgs['firstDate'] >= sarDB.minDate )
+    print(myArgs['firstDate'] >= sarDB.minDate)
     print(myArgs['lastDate'] <= sarDB.maxDate)
     return myArgs['firstDate'] >= sarDB.minDate and \
         myArgs['lastDate'] <= sarDB.maxDate
@@ -502,7 +502,7 @@ def main():
     #
     myDB = mosf.sarDB()
     myDB.readDB(myArgs['dateDBs'])
-    #myDB.printByDate()
+    # myDB.printByDate()
     #
     print(checkDateRange(myArgs, myDB))
     if not checkDateRange(myArgs, myDB):

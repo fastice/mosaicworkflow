@@ -608,7 +608,7 @@ def makeQVRTSs(piecesFiles, outDir, template):
             f'-tr {template["dx"]} {template["dy"]} -vrtnodata' \
             f' {noData[suffix]} {outDir}{suffix}.vrt *{suffix}.tif'
         print(command)
-        call(command, shell=True, executable='/bin/csh')
+        call(command, shell=True)  # executable='/bin/csh')
 
 # ---------------------------------------------------------------------------
 # read landsat list file and filter by date
@@ -673,7 +673,7 @@ def makeShapeOutputs(outDir, firstDate, lastDate):
         f' {outDir}/meta/SAR.{firstDate.strftime("%Y-%m-%d")}.' \
         f'{lastDate.strftime("%Y-%m-%d")}'
     print(command)
-    call(command, shell=True, executable='/bin/csh')
+    call(command, shell=True)  # , executable='/bin/csh')
     #
     # setup landsat shapes
     lsFile = f'{outDir}/lsData.{firstDate.strftime("%Y-%m-%d")}.' \
@@ -686,7 +686,7 @@ def makeShapeOutputs(outDir, firstDate, lastDate):
             f'{firstDate.strftime("%Y-%m-%d")}.' \
             f'{lastDate.strftime("%Y-%m-%d")}'
         print(command)
-        call(command, shell=True, executable='/bin/csh')
+        call(command, shell=True)  # , executable='/bin/csh')
     # done
     return
 
@@ -775,7 +775,7 @@ def writeJPG(browseTiff):
     jpgRes = 500
     command = f'gdal_translate -co "QUALITY=99" -scale -of JPEG -r ' \
         f'average -tr {jpgRes} {jpgRes} {browseTiff} {jpgFile}'
-    call(command, shell=True, executable='/bin/csh')
+    call(command, shell=True)  # , executable='/bin/csh')
 
 
 def processFinalPreview(outDir, template):
@@ -1185,8 +1185,8 @@ def runSubMosaic(outPath, inputFileName, outFileName, baseFlags, firstDate,
         command = f'cd {outPath}; mosaic3d -writeBlank -center {flags} ' \
             f'pieces/{inputFileName} {dem} pieces/{outFileName}'
         print(command, file=stdout)
-        call(command, shell=True, executable='/bin/csh', stdout=stdout,
-             stderr=stderr)
+        # , executable='/bin/csh'
+        call(command, shell=True, stdout=stdout, stderr=stderr)
     except Exception:
         # if missing files, reject to the NoResult directory
         u.mywarning(f'warning: could not run {outPath}/runOff')

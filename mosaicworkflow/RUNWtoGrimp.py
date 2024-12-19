@@ -146,8 +146,8 @@ def runInterp(outputDir, inputFile, outputFile, nr, na, ratThresh=1,
     print(command)
     #
     # Run command
-    call(command, shell=True, executable='/bin/csh', stderr=stderr,
-         stdout=stdout)
+    # executable='/bin/csh',
+    call(command, shell=True,  stderr=stderr, stdout=stdout)
 
 
 def writePairInfo(myRUNW, outputDir):

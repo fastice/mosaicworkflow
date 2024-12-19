@@ -339,7 +339,7 @@ def LLtoRA(lat, lon, geodatFile, dem=None):
     # execute lltora
     command = f'lltora {geodatFile} {dem} temp.{pid}.ll temp.{pid}.ra'
     #
-    call(command, shell=True, executable='/bin/csh')
+    call(command, shell=True)  # executable='/bin/csh')
     # read and reformat data
     r, a = u.readLLtoRA(tempfile=f'temp.{pid}.ra')
     r = np.reshape(r, lat.shape)
@@ -512,7 +512,7 @@ def runSim(geodatFile, offsetsDat, dem, maskInputFile, syncDat,
     command = f'siminsar {byteOrderFlag} -center -toLL {offsetsDat} -mask ' \
         f'-xyDEM {dem}  {maskInputFile} {geodatFile} {offsetsRoot}'
     print(command)
-    call(command, shell=True,  executable='/bin/csh')
+    call(command, shell=True)  # executable='/bin/csh')
 
 
 def main():

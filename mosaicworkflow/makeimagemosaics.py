@@ -155,7 +155,7 @@ def makeImageMosaic(date1, date2, myArgs):
     # print(f'\n{command}')
     # u.myerror('debug')
     # make add this mosaic to thread list
-    call(command, shell=True, executable='/bin/csh')
+    call(command, shell=True)  # , executable='/bin/csh')
 
 
 def makeProdName(prefix, date1, date2):

@@ -377,7 +377,8 @@ def makeMosaic3D(outDir):
     n = random.randint(1, 10000)
     fout = open(f'{outDir}/stdout.{n}', 'w')
     ferr = open(f'{outDir}/stderr.{n}', 'w')
-    call(command, shell=True, executable='/bin/csh', stdout=fout, stderr=ferr)
+    # , executable='/bin/csh'
+    call(command, shell=True, stdout=fout, stderr=ferr)
     fout.close()
     ferr.close()
     os.remove(f'{outDir}/stdout.{n}')
@@ -395,8 +396,8 @@ def makeJPG(outDir, productDir, velRoot, sensor):
         command = f'cd {outDir} ; showvel.py -fig={name} -title={name} ' \
             f'-subtitle="''NASA MEaSUREs GIMP product produced using ' \
             f'{spaceAgency[sensor]}''"'
-        call(command, shell=True, executable='/bin/csh', stdout=fout,
-             stderr=ferr)
+        #  executable='/bin/csh',
+        call(command, shell=True, stdout=fout, stderr=ferr)
         os.rename(f'{outDir}/{name}.jpg', f'{productDir}/{name}.jpg')
     #
     os.remove(f'{outDir}/stdout.{n}')
