@@ -23,7 +23,7 @@ def makemosaicArgs():
     parser = argparse.ArgumentParser(
         description='\033[1mFront end to run image mosaics '
         'using setupimagemosaic.py \033[0m',
-        epilog='Notes:  ', allow_abbrev='False')
+        epilog='Notes:\nPart of the mosaicworkflow package.', allow_abbrev='False')
     parser.add_argument('--firstdate', type=str, default='2015-01-01',
                         help='Use first dates >= first date [2015-01-01]')
     defaultEnd = date.today().strftime('%Y-%m-%d')
@@ -49,37 +49,60 @@ def makemosaicArgs():
                         help='Do all steps but run - can be used to clean')
     parser.add_argument('--calibrate', action='store_true', default=False,
                         help='Make an S1 calibrated image product')
+    parser.add_argument('--corr', action='store_true', default=False,
+                        help='Make a NISAR correlation (coherence) mosaic')
     parser.add_argument('--check', action='store_true', default=False,
                         help='Setup command,  check masks, but do not run')
+    parser.add_argument('--ascendingOnly', action='store_true', default=False,
+                        help='Only include ascending data')
+    parser.add_argument('--descendingOnly', action='store_true', default=False,
+                        help='Only include descending data')
     parser.add_argument('--prefix', type=str, default='GL_S1bks_mosaic',
                         help='Prefix for product name')
+    parser.add_argument('template_pos', type=str, nargs='?', default=None,
+                        help='template file (positional form)')
     parser.add_argument('--template', type=str, default='mosaic.template.yaml',
-                        help='template that defines mosaic')
+                        help='template that defines mosaic [mosaic.template.yaml]')
+    parser.add_argument('--removePad', type=int, default=5,
+                        help='Remove first and last n cols')
+    parser.add_argument('--averageAll', action='store_true', default=False,
+                        help='Create a single mosaic averaging all scenes '
+                        'from --firstdate to --lastdate (no date splitting)')
     args = parser.parse_args()
-    _, _, DBPaths, _, prefix = mosf.mosaicTempArgs(args.template)
+    template = args.template_pos if args.template_pos is not None else args.template
+    _, _, DBPaths, _, prefix, _, removePad, _, averageAllTemplate = mosf.mosaicTempArgs(template)
+    if args.removePad == 5:
+        removePad = args.removePad
     if prefix is None:
         prefix = args.prefix
     #
     firstDate = datetime.strptime(args.firstdate, "%Y-%m-%d")
     endDate = datetime.strptime(args.lastdate, "%Y-%m-%d")
-    # Adjust dates to standard intervals
-    if not args.noAdjustDate:
-        firstDate = adjustFirstDate(firstDate)
-
+    # CLI flag wins; template value is the fallback default
+    averageAll = args.averageAll or averageAllTemplate
+    # Adjust dates to standard intervals (skip for averageAll — user dates are used as-is)
+    if not args.noAdjustDate and not averageAll:
+        firstDate = adjustFirstDate(firstDate, nisar=args.corr)
+    if args.descendingOnly and args.ascendingOnly:
+        u.myerror('descendingOnly and ascendingOnly flags mutually exclusive')
     myArgs = {'firstDate': firstDate, 'lastDate': endDate,
               'noReprocess': args.noReprocess, 'check': args.check,
               'noMosaic': args.noMosaic,
-              'calibrate': args.calibrate, 'noClean': args.noClean,
+              'calibrate': args.calibrate, 'corr': args.corr, 'noClean': args.noClean,
               'setupOnly': args.setupOnly, 'reset': args.reset,
-              'templateFile': args.template, 'nDays': args.nDays,
+              'templateFile': template, 'nDays': args.nDays,
               'noCheckEndDate': args.noCheckEndDate,
               'noAdjustDate': args.noAdjustDate,
+              'averageAll': averageAll,
+              'ascendingOnly': args.ascendingOnly,
+              'descendingOnly': args.descendingOnly,
+              'removePad': removePad,
               'prefix': prefix, 'dateDBs': DBPaths}
     print(myArgs)
     return myArgs
 
 
-def adjustFirstDate(firstdate):
+def adjustFirstDate(firstdate, nisar=False):
     '''
     Adjust the first date to the standard dates, so that it precedes
     the standard date  (e.g., s1 fd s2 s3) -> fd=s2
@@ -87,13 +110,16 @@ def adjustFirstDate(firstdate):
     ----------
     firstdate : datetime
         Nominal first date.
+    nisar : bool, optional
+        If True, never resume 6-day cycles (NISAR repeat is always 12 days).
     Returns
     -------
     myDate : date time
         Adjusted fir date..
 
     '''
-    myDates = mosf.standardDates()
+    resume6Day = datetime(2100, 1, 1) if nisar else datetime(2025, 4, 1)
+    myDates = mosf.standardDates(resume6DayDates=resume6Day)
     myDates.reverse()
     for myDate in myDates:
         if myDate['date1'] <= firstdate:
@@ -113,11 +139,16 @@ def getProductList(myArgs):
     myProducts: .
         list of products to process
     '''
+    if myArgs.get('averageAll'):
+        return [{'date1': myArgs['firstDate'], 'date2': myArgs['lastDate']}]
     firstDate = None
     if myArgs['noAdjustDate']:
         firstDate = myArgs['firstDate']
+    resume6Day = datetime(2100, 1, 1) if myArgs.get('corr') \
+        else datetime(2025, 4, 1)
     sDateRanges = mosf.standardDates(nDays=myArgs['nDays'],
-                                     firstDate=firstDate)
+                                     firstDate=firstDate,
+                                     resume6DayDates=resume6Day)
     myDates = []
     print(f'Date Range = {myArgs["firstDate"].strftime("%Y-%m-%d")}'
           f' {myArgs["lastDate"].strftime("%Y-%m-%d")}')
@@ -145,15 +176,16 @@ def makeImageMosaic(date1, date2, myArgs):
 
     '''
     nDays = (date2-date1).days + 1
+    
     command = f'setupimagemosaic.py --firstdate {date1.strftime("%Y-%m-%d")}' \
-        f' --nDays {nDays} --template {myArgs["templateFile"]} '
-    for key in ['calibrate', 'noReprocess', 'noMosaic', 'noClean',
-                'setupOnly']:
+        f' --nDays {nDays} --template {myArgs["templateFile"]} ' \
+        f'--removePad {myArgs["removePad"]}'
+    for key in ['calibrate', 'corr', 'noReprocess', 'noMosaic', 'noClean',
+                'setupOnly', 'descendingOnly', 'ascendingOnly', 'averageAll']:
         if myArgs[key]:
             command += f' --{key}'
     command += f' --prefix {myArgs["prefix"]}'
-    # print(f'\n{command}')
-    # u.myerror('debug')
+    print(f'\n{command}')
     # make add this mosaic to thread list
     call(command, shell=True)  # , executable='/bin/csh')
 
@@ -183,19 +215,25 @@ def checkProduct(date1, date2, myArgs, posting):
     exists bool,
         return True if directory and image products exist.
     '''
-    calString = 'uncalibrated'
-    if myArgs['calibrate']:
+    if myArgs.get('corr'):
+        calString = 'corr'
+    elif myArgs['calibrate']:
         calString = 'calibrated'
-        #
+    else:
+        calString = 'uncalibrated'
+    #
     dirName = f'{myArgs["prefix"]}_{calString}.' \
         f'{date1.strftime("%Y-%m-%d")}.{date2.strftime("%Y-%m-%d")}'
     prodName = makeProdName(myArgs["prefix"], date1, date2)
     if not os.path.exists(dirName):
         return False  # No product directory so return false
     # check image products exist
-    suffixes = ['image']
-    if myArgs['calibrate']:
+    if myArgs.get('corr'):
+        suffixes = ['corr']
+    elif myArgs['calibrate']:
         suffixes = ['gamma0', 'sigma0']
+    else:
+        suffixes = ['image']
     for suffix in suffixes:
         tifName = prodName.replace("*", suffix).replace("RES", str(posting))
         myTiff = f'{dirName}/release/{tifName}.tif'
@@ -250,15 +288,19 @@ def main():
     ''' Produce image mosaics '''
     # get args
     myArgs = makemosaicArgs()
+   # print(myArgs)
+    #u.myerror('sto')
     posting = mosf.readTemplate(myArgs['templateFile'])['dx']
     if not myArgs['noCheckEndDate']:
         checkLastDateAgainsDB(myArgs)
     myProds = getProductList(myArgs)
     print(myProds)
-    # u.myerror('stop')
+    #u.myerror('stop')
     #
     threads = setupProducts(myProds, myArgs, posting)
     maxThreads = 1
+    print(len(threads))
+    #u.myerror('asdf')
     u.runMyThreads(threads, maxThreads, 'geomosaic')
     print(myProds)
 

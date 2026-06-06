@@ -47,9 +47,9 @@ def simOffsetsProcessArgs1(fp):
     """
     Process arguments and defaults
     """
-
     # Resolve slcs other wise default to current dir
-    slcs = glob.glob('ls -l *.slc')
+    slcs = [os.readlink(x) if os.path.islink(x) else x
+            for x in glob.glob('*.slc')]
     second = [s for s in slcs if '../' in s]
     if len(second) == 1:
         secondDirDefault = '../'+second[0].split('/')[1]
@@ -59,7 +59,8 @@ def simOffsetsProcessArgs1(fp):
     epilog = 'Notes: 1) Run in directory for the desired image pair ' \
         '2) Default region is greenland for NH or SH as determined from ' \
         'geodat 3) produces the following: offsets.da(.da.dat, .dr, ' \
-        '.dr.dat, .dat, .lat, .lon, .mask, .simdat) '
+        '.dr.dat, .dat, .lat, .lon, .mask, .simdat) ' \
+        '\nPart of the mosaicworkflow package.'
     parser = argparse.ArgumentParser(description='\033[1m\n Use a velocity map'
                                      ' to simulate offsets for initial guess'
                                      ' in feature tracking\033[0m\n',
@@ -80,13 +81,13 @@ def simOffsetsProcessArgs1(fp):
     parser.add_argument('-fastMask', '--fastMask',  action='store_true',
                         default=False,
                         help='Use the fast mask for mask generation')
-    parser.add_argument('-LSB ', '--LSB',  action='store_true',
+    parser.add_argument('-LSB', '--LSB', action='store_true',
                         default=False,
-                        help='Use the fast mask for mask generation')
+                        help='Write output in LSB byte order [MSB]')
     parser.add_argument('-velMap', '--velMap', type=str,
                         default=None, help='Root name for velocity map '
                         '[from Region file or default regionDefs]')
-    parser.add_argument('-dem', '--dem', type=str, nargs=1, default=None,
+    parser.add_argument('-dem', '--dem', type=str, default=None,
                         help='DEM [from Region file or default regionDefs]')
 
     parser.add_argument('-region', '--region', type=str, default=None,
@@ -111,6 +112,8 @@ def simOffsetsProcessArgs1(fp):
     parser.add_argument('-maskInputFile', '--maskInputFile', type=str,
                         default=None, help='Flat byte file with mask'
                         '[None]')
+    parser.add_argument('--ompThreads', type=int, default=4,
+                        help='Number of OpenMP threads for siminsar [4]')
 
     #
     # Parse Args.
@@ -127,7 +130,7 @@ def simOffsetsProcessArgs1(fp):
     #
     return args.azOffsets, args.offsetsDat, myRegion, args.geodatFile, \
         secondGeodatFile, args.syncDat, args.fastMask, not args.noVel, \
-        byteOrder
+        byteOrder, args.ompThreads
 
 
 def resolveRegion(args):
@@ -452,10 +455,12 @@ def computeVelocityRA(velMap, offsets1, srsInfo):
     xps1, yps1 = vel.geo.lltoxykm(lat1, lon1)
     xyAngle = np.arctan2(-yps1, -xps1)
     rotAngle = (offsets1.computeHeading() + np.pi/2.) - xyAngle
+    print('rotAngle', np.nanmean(rotAngle))
     #
     #  interpolate velocity
     vel.setupInterp()
     vxr, vyr, vr = vel.interpGeo(xps1, yps1)
+    print('vx, vy', np.nanmean(vxr), np.nanmean(vyr), np.nanmean(vr))
     vr[np.isnan(vr)] = 0
     #
     # set fast regions to 8 to flag
@@ -485,7 +490,7 @@ def printError(msg, var, fp):
 
 
 def runSim(geodatFile, offsetsDat, dem, maskInputFile, syncDat,
-           byteOrder='MSB'):
+           byteOrder='MSB', ompThreads=4):
     """
     runSim - run simulation with siminsar
     If no offsets.lat/lon/dat, create them
@@ -509,7 +514,8 @@ def runSim(geodatFile, offsetsDat, dem, maskInputFile, syncDat,
             u.myerror(f'siminsar.py - runSim - missing {offsetsDat:s} ')
     #
     offsetsRoot = offsetsDat.replace('.dat', '').replace('.vrt', '')
-    command = f'siminsar {byteOrderFlag} -center -toLL {offsetsDat} -mask ' \
+    command = f'siminsar {byteOrderFlag} -ompThreads {ompThreads} ' \
+        f'-center -toLL {offsetsDat} -mask ' \
         f'-xyDEM {dem}  {maskInputFile} {geodatFile} {offsetsRoot}'
     print(command)
     call(command, shell=True)  # executable='/bin/csh')
@@ -524,14 +530,14 @@ def main():
     #
     fp = open('fail.simoffsets', 'w')
     azOffsets, offsetsDat, myRegion, geodatFile, secondGeoDatFile, syncDat, \
-        fastMask, useVel, byteOrder = simOffsetsProcessArgs1(fp)
+        fastMask, useVel, byteOrder, ompThreads = simOffsetsProcessArgs1(fp)
+    #
     for key in myRegion.region:
         print(myRegion.region[key])
     #
     if not os.path.exists(secondGeoDatFile):
         printError('Second geodatFile  not found: ', secondGeoDatFile, fp)
         exit()
-
     #
     # run simoff
     #
@@ -544,7 +550,7 @@ def main():
             or not os.path.exists(maskFile) \
             or not os.path.exists(offsetsDat) or syncDat:
         runSim(geodatFile, offsetsDat, myRegion.dem(), maskInputFile, syncDat,
-               byteOrder=byteOrder)
+               byteOrder=byteOrder, ompThreads=ompThreads)
     #
     # load offsets
     #
@@ -573,9 +579,13 @@ def main():
     # compute motion offsets
     #
     if useVel:
+        print('Using velocity')
         vr, va = computeVelocityRA(myRegion.velMap(), offsets1,
                                    myRegion.srsInfo())
+        if offsets1.geodatrxa.lookdir == 'left':
+            vr *= -1
     else:
+        print('No velocity')
         vr, va = np.zeros(dr0.shape), np.zeros(dr0.shape)
     #
     # Combine results

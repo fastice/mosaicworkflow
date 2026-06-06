@@ -20,7 +20,8 @@ def getRefreshArgs():
             '  2) Executes maketies.py -run year1 year2 ... for each track\n'
             '  3) --winter uses tiepoints in .../Sentinel1/tiepoints/'
             'track-winter/tiepoints-winter-Year\n'
-            '  4) --tieFiles uses quarterly tiepoint files in tiefile.yaml'
+            '  4) --tieFiles uses quarterly tiepoint files in tiefile.yaml\n'
+            '\nPart of the mosaicworkflow package.'
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -51,6 +52,10 @@ def getRefreshArgs():
     parser.add_argument(
         '-phase', '--phase', action='store_true',
         help='Phase tiepoints (no thumbs; implies --tiesOnly)'
+    )
+    parser.add_argument(
+        '-phaseAndOffsets', '--phaseAndOffsets', action='store_true',
+        help='NISAR phase+offsets mode: pass -phase to maketies but still run makeframetie.py'
     )
     parser.add_argument(
         '-winter', '--winter', action='store_true',
@@ -89,6 +94,9 @@ def getRefreshArgs():
     if args.phase:
         tiesOnly = True  # Always noThumbs with phase
         flags['phaseFlag'] = ' -phase '
+    if args.phaseAndOffsets:
+        # NISAR mode: maketies gets -phase but makeframetie.py still runs
+        flags['phaseFlag'] = ' -phase '
 
     if velthumbsOnly and tiesOnly:
         u.myerror('Cannot use both velthumbsOnly and tiesOnly')
@@ -101,8 +109,16 @@ def getRefreshArgs():
 def runTies(rundir, years, tiesOnly, velthumbsOnly, tieFiles, flags, overWrite, keepVz):
     cwd = os.getcwd()
     sensor = None
-    sensorYaml = os.path.join(cwd, 'sensor.yaml')
-    if os.path.isfile(sensorYaml):
+    projectYaml = os.path.join(cwd, 'project.yaml')
+    legacyYaml = os.path.join(cwd, 'sensor.yaml')
+    if os.path.isfile(projectYaml):
+        sensorYaml = projectYaml
+    elif os.path.isfile(legacyYaml):
+        u.mywarning('sensor.yaml found but project.yaml expected — rename to project.yaml')
+        sensorYaml = legacyYaml
+    else:
+        sensorYaml = None
+    if sensorYaml is not None:
         with open(sensorYaml, 'r') as f:
             sensorData = yaml.safe_load(f)
         sensor = sensorData.get('sensor', None)
@@ -116,7 +132,7 @@ def runTies(rundir, years, tiesOnly, velthumbsOnly, tieFiles, flags, overWrite, 
         elif 'ALOS2' in cwd:
             sensor = 'ALOS2'
         elif 'NISAR' in cwd:
-            sensor = 'NISARTest'
+            sensor = 'NISAR'
         else:
             u.myerror('refreshties.py: unsuported sensor')
     try:

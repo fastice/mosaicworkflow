@@ -18,6 +18,7 @@ from PIL import Image
 from PIL import ImageFont
 from PIL import ImageDraw
 import gc
+import json
 # Currently this is hardwired here since this program only works for greenland.
 # It could be used for future expansion to Antarctica I have tried to use it to
 # flag ice sheet specific stuff
@@ -84,7 +85,7 @@ def processFlags(args, template):
     flags = {}
     # Dates
     for flag in ['firstdate', 'lastdate', 'noTSX', 'noCull', 'check',
-                 'timeOverlapOff', 'noReprocess']:
+                 'timeOverlapOff', 'noReprocess', 'noLabel']:
         if flag in args:
             flags[flag] = getattr(args, flag)
         else:
@@ -124,7 +125,7 @@ def processQArgs():
     ''' Handle command line args'''
     parser = argparse.ArgumentParser(
         description='\033[1;34m Setup individual velocity mosaics \033[0m',
-        epilog='Notes:  ', allow_abbrev='False')
+        epilog='Notes:\nPart of the mosaicworkflow package.', allow_abbrev='False')
     # flag
     parser.add_argument('--firstdate', type=str, default='2015-01-01',
                         help='First date for series of mosaics. '
@@ -140,6 +141,9 @@ def processQArgs():
     # flag
     parser.add_argument('--noTSX', action='store_true', default=False,
                         help='Exclude TSX/CSK data')
+    # flag
+    parser.add_argument('--noLabel', action='store_true', default=False,
+                        help='No source label')
     # flag
     parser.add_argument('--noCull', action='store_true', default=False,
                         help='Use unculled offsets')
@@ -196,6 +200,22 @@ def readWKT(wktFile):
 # -----------------------------------------------------------------------------
 
 
+def getDateFromGeodat(geo):
+    ''' get date from old geodat or geojson '''
+    if '.in' in geo:
+        with open(geo, 'r') as fgeo:
+            # read geodat to extract date
+            for gline in fgeo:
+                if 'Image date' in gline:
+                    gline = gline.split(':')[1]
+                    gline = gline.strip('\n').replace(' ', '')
+                    return datetime.strptime(gline, '%d%b%Y')
+    elif '.geojson' in geo:
+        with open(geo) as fgeo:
+            props = json.load(fgeo)['properties']
+            return datetime.strptime(props['Date'], '%Y-%m-%d')
+
+
 def processInputFileQ(filename, noTSX):
     try:
         inputFile = open(filename, 'r')
@@ -216,14 +236,7 @@ def processInputFileQ(filename, noTSX):
             geo = parts[1].strip()
             exclude = "/".join(geo.split('/')[0:-2])+'/Exclude'
             if not os.path.exists(exclude):
-                with open(geo, 'r') as fgeo:
-                    # read geodat to extract date
-                    for gline in fgeo:
-                        if 'Image date' in gline:
-                            gline = gline.split(':')[1]
-                            gline = gline.strip('\n').replace(' ', '')
-                            mydate = datetime.strptime(gline, '%d%b%Y')
-                            break
+                mydate = getDateFromGeodat(geo)
                 count += 1
                 if count % 500 == 0:
                     print('.', end='')
@@ -303,14 +316,12 @@ def writeInputFileQ(infile, xdim, ydim, dataTakes, flags):
             # print(screenTSX)
     productType = prodType(flags['firstdate'], flags['lastdate'])
     #
-
     # now loop through data takes, keeping ones in range
     if productType == 'Annual':
         TSXSeasonCount = computeTSXSeasonCount(dataTakes,
                                                flags['firstdate'],
                                                flags['lastdate'])
     #
-
     for dataTake in dataTakes:
         firstDate = dataTake[0]
         tmp = dataTake[1].split()
@@ -388,7 +399,6 @@ def maskMosaic(pieceName, pieceGeodat, outDir, outputMaskShape,
                baseFlags):
     #
     # make mask for region quadName
-    #print(':', pieceName, pieceGeodat, outputMaskShape)
     mask = u.makeMaskFromShape(pieceGeodat, outputMaskShape)
     # print(np.sum(mask), outputMaskShape)
     # print(outputRegions[quadName][1], outputMaskShape)
@@ -778,7 +788,7 @@ def writeJPG(browseTiff):
     call(command, shell=True)  # , executable='/bin/csh')
 
 
-def processFinalPreview(outDir, template):
+def processFinalPreview(outDir, template, flags):
     '''
     Create the final preview
     '''
@@ -810,7 +820,8 @@ def processFinalPreview(outDir, template):
     del(hsv)
     gc.collect()
     # Label image
-    rgb = addLabel(rgb, template)
+    if not flags['noLabel']:
+        rgb = addLabel(rgb, template)
     # Write result to release dir
     writeRGBTiff(finalBrowse, rgb, template)
     del(rgb)
@@ -882,7 +893,7 @@ def processFinalVRTs(outDir, releaseDir, flags):
         threads.append(threading.Thread(target=call, args=[command],
                                         kwargs={'shell': True,
                                                 'executable': '/bin/csh'}))
-        #call(command, shell=True, executable='/bin/csh')
+        # call(command, shell=True, executable='/bin/csh')
     u.runMyThreads(threads, 8, '', quiet=True)
     u.popd()
 
@@ -1043,7 +1054,7 @@ def makeFinalOutput(outDir, template, flags):
     #
     # this will assemble preview from pieces into single cog tif
     print('Making preview....')
-    processFinalPreview(outDir, template)
+    processFinalPreview(outDir, template, flags)
     #
     # Make final shape
     u.pushd(releaseDir)
@@ -1068,14 +1079,16 @@ def populatePremet(preMetData, firstDate, lastDate, validPlatforms={}):
     sensorShort = {'S1A': 'C-SAR', 'S1B': 'C-SAR', 'TSX': 'X-SAR',
                    'TDX': 'X-SAR', 'LS8': 'OLI', 'LS9': 'OLI-2',
                    'RADARSAT-1': 'C-SAR',
-                   'ERS-1/2': 'C-SAR', 'ALOS1-PALSAR': 'PALSAR'}
+                   'ERS-1/2': 'C-SAR', 'ALOS1-PALSAR': 'PALSAR',
+                   'NISAR': 'NISARL'}
     sensorShort = {**CSKsens, **sensorShort}
     CSKinst = {'CSK': 'X-SAR', 'CSKS1': 'X-SAR', 'CSKS2': 'X-SAR',
                'CSKS3': 'X-SAR', 'CSKS4': 'X-SAR'}
     instShort = {'S1A': 'C-SAR', 'S1B': 'C-SAR', 'TSX': 'X-SAR',
                  'TDX': 'X-SAR', 'LS8': 'OLI', 'LS9': 'OLI-2',
                  'RADARSAT-1': 'C-SAR',
-                 'ERS-1/2': 'C-SAR', 'ALOS1-PALSAR': 'PALSAR'}
+                 'ERS-1/2': 'C-SAR', 'ALOS1-PALSAR': 'PALSAR',
+                 'NISAR': 'NISAR'}
     instShort = {**CSKinst, **instShort}
     cskIns = {'CSKS1': 'COSMO-SKYMED 1', 'CSKS2': 'X-SAR',
               'CSKS3': 'COSMO-SKYMED 3', 'CSKS4': 'COSMO-SKYMED 4'}
@@ -1083,7 +1096,7 @@ def populatePremet(preMetData, firstDate, lastDate, validPlatforms={}):
                   'TDX': 'TDX', 'CSK': 'COSMO-SKYMED',
                   'LS8': 'LANDSAT-8', 'LS9': 'LANDSAT-9',
                   'RADARSAT-1': 'RADARSAT-1', 'ERS-1/2': 'ERS-1-2',
-                  'ALOS1-PALSAR': 'ALOS1-PALSAR'}
+                  'ALOS1-PALSAR': 'ALOS1-PALSAR', 'NISAR': 'NSARL'}
     instrument = {**instrument, **cskIns}
     for platform in validPlatforms.keys():
         # print('VP Key', platform)
@@ -1341,6 +1354,7 @@ def main():
         if preMetFile is not None:
             print(preMetFile)
             makeSpatial(outDir, preMetFile.replace('premet', 'spo'), template)
+
 
 if __name__ == "__main__":
     main()

@@ -144,7 +144,8 @@ def main():
             'velocity maps\n\n'
             'Notes for TSX:\n'
             '  1) If there are multiple tracks, the format is '
-            'tie_plan20XX-TTT, otherwise -TTT is omitted'
+            'tie_plan20XX-TTT, otherwise -TTT is omitted\n'
+            '\nPart of the mosaicworkflow package.'
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter
     )

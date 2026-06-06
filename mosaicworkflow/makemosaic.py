@@ -19,7 +19,7 @@ def makemosaicArgs():
     parser = argparse.ArgumentParser(
         description='\033[1mFront end to run velocity mosaics '
         'using setupquarters.py \033[0m',
-        epilog='Notes:  ', allow_abbrev='False')
+        epilog='Notes:\nPart of the mosaicworkflow package.', allow_abbrev='False')
     parser.add_argument('--firstdate', type=str, default='2015-01-01',
                         help='Use central dates >= first date [2015-01-01]')
     defaultEnd = date.today().strftime('%Y-%m-%d')
@@ -60,6 +60,8 @@ def makemosaicArgs():
                         help='Setup command,  check masks, but do not run')
     parser.add_argument('--template', type=str, default='mosaic.template.yaml',
                         help='template that defines mosaic')
+    parser.add_argument('--noLabel', action='store_true', default=False,
+                        help='No processing source label')
     parser.add_argument('--mosaicsSetupFile', type=str,
                         default='mosaicsSetup.yaml',
                         help='yaml with seasonal and mask information')
@@ -88,7 +90,8 @@ def makemosaicArgs():
               'check': args.check, 'template': args.template,
               'outputMask': args.outputMask,
               'keepFast': args.keepFast, 'baseFlags': args.baseFlags,
-              'noLandsat': args.noLandsat, 'fitType': args.LSFitType}
+              'noLandsat': args.noLandsat, 'fitType': args.LSFitType,
+              'noLabel': args.noLabel}
     return myArgs
 
 
@@ -256,7 +259,7 @@ def makeCommand(firstDate, lastDate, mergedList, mosaicMaskFile, myArgs):
     ''' setup and return command '''
     #
     outputMaskArg, templateArg, lsArg, baseFlagsArg, keepFastFlag, \
-        mosaicMaskArg, noReprocessFlag, noTSXFlag = [''] * 8
+        mosaicMaskArg, noReprocessFlag, noTSXFlag, noLabelFlag = [''] * 9
     #
     noReprocessFlag = {False: '', True: '--noReprocess'}[myArgs["noReprocess"]]
     #
@@ -287,6 +290,8 @@ def makeCommand(firstDate, lastDate, mergedList, mosaicMaskFile, myArgs):
     # keepFast uses no cull for melanges
     if myArgs["keepFast"]:
         keepFastFlag = '--noCull '
+    if myArgs["noLabel"]:
+        noLabelFlag = '--noLabel '
     # TSX excluded from single sycle data
     if myArgs["interval"] == 's1cycle' or myArgs["interval"] == 's1-12day':
         noTSXFlag = ' --noTSX'
@@ -295,7 +300,7 @@ def makeCommand(firstDate, lastDate, mergedList, mosaicMaskFile, myArgs):
         f'{templateArg} ' \
         f'--firstdate {firstDate.strftime("%Y-%m-%d")} ' \
         f' --lastdate {lastDate.strftime("%Y-%m-%d")} ' \
-        f'{noReprocessFlag} {keepFastFlag} {noTSXFlag} ' \
+        f'{noReprocessFlag} {keepFastFlag} {noTSXFlag} {noLabelFlag} ' \
         f'{baseFlagsArg}' \
         f'{outputMaskArg} '  \
         f'{mosaicMaskArg} ' \

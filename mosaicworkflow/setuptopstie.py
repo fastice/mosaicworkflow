@@ -9,11 +9,21 @@ import glob
 import yaml
 import json
 
+def _readOrbitSensorYaml(orbitDir):
+    """Read sensor.*.yaml from an orbit_frame directory; return dict or {}."""
+    yamlFiles = glob.glob(os.path.join(orbitDir, 'sensor.*.yaml'))
+    if yamlFiles:
+        with open(yamlFiles[0]) as f:
+            return yaml.safe_load(f) or {}
+    return {}
+
+
 def setuptopstiesUsage():
     """Print usage/help for the script using argparse formatting."""
     parser = argparse.ArgumentParser(
       prog='setuptopstie.py',
-      description='Make a tops tiepoint file for specified year')
+      description='Make a tops tiepoint file for specified year',
+      epilog='Part of the mosaicworkflow package.')
     parser.add_argument('-winter', '--winter', action='store_true',
                 help='Uses winter tiepoints generated from coastal pairs')
     parser.add_argument('-phase', '--phase', action='store_true',
@@ -46,7 +56,8 @@ def getSTTArgs():
 
     parser = argparse.ArgumentParser(
         prog='setuptopstie.py',
-        description='Make a tops tiepoint file for specified year')
+        description='Make a tops tiepoint file for specified year',
+      epilog='Part of the mosaicworkflow package.')
     parser.add_argument('-winter', '--winter', action='store_true',
                         help='Uses winter tiepoints generated from coastal pairs')
     parser.add_argument('-phase', '--phase', action='store_true',
@@ -272,7 +283,7 @@ def getSensorInfoAndHeader(sensor, year, sensor_yaml=None):
         if yaml_header is not None:
             header = yaml_header
             maxDays = 37  # default; overridden below if yaml_maxDays set
-        elif sensor in ['Sentinel', 'NISARTest']:
+        elif sensor in ['Sentinel', 'NISARTest', 'NISAR']:
             header = 'tiepoints/tie_plan_header'
             maxDays = 37
         elif sensor == 'ALOS2':
@@ -368,10 +379,10 @@ def parsePairFromStrack(strackFile, myDir):
     return date1, date2, orbit1, orbit2, nlr, nla
 
 
-def getPairs(year, phaseTies, winterTies, region, framePattern='*'):
+def getPairs(year, phaseTies, winterTies, region, sensor, maxDays, framePattern='*'):
     ''' '''
     myDirs = sorted(glob.glob(f'*_{framePattern}'))
-    nDays = []
+    nDaysList = []
     pairs = {}
     # default
     firstDate, lastDate = datetime(year, 1, 1), datetime(year, 12, 31)
@@ -381,7 +392,6 @@ def getPairs(year, phaseTies, winterTies, region, framePattern='*'):
             firstDate, lastDate = datetime(year-1, 6, 1), datetime(year, 5, 31)
     #
     # Look through data
-    #print(myDirs)
     for myDir in myDirs:
         myPair = sorted(glob.glob(f'{myDir}/*.pairinfo'))
         # get pairinfo from pairinfo file if it exists
@@ -408,18 +418,25 @@ def getPairs(year, phaseTies, winterTies, region, framePattern='*'):
                 nD = -nD
                 print('**** warning: negative nDays - changing sign***',
                       file=sys.stderr)
-            # print(nD, nDays, nD not in nDays  )
-            if nD not in nDays:
-                nDays.append(nD)
+            # for NISAR, read per-product maxDays from sensor.*.yaml; others use global
+            if 'NISAR' in sensor:
+                orbitParams = _readOrbitSensorYaml(myDir)
+                effectiveMaxDays = orbitParams.get('maxDays', maxDays)
+            else:
+                effectiveMaxDays = maxDays
+            if nD > effectiveMaxDays:
+                continue
+            if nD not in nDaysList:
+                nDaysList.append(nD)
                 pairs.update({nD: []})
             pairs[nD].append({'date1': date1, 'date2': date2, 'orbit1': orbit1,
                               'orbit2': orbit2, 'frame': frame, 'nlr': nlr,
                               'nla': nla})
     # sort by date
-    for nD in nDays:
+    for nD in nDaysList:
         pairs[nD] = sorted(pairs[nD], key=lambda k: k['date1'])
     #
-    return pairs, nDays
+    return pairs, nDaysList
 
 
 def copyHeader(fout, header, winterTies, phaseTies, sensor, rootdir, year):
@@ -468,9 +485,13 @@ def getPrefix(imageDir, phaseTies):
     return prefix, noUse
 
 
-def tieCodes(phaseTies, track):
+def tieCodes(phaseTies, track, sensor=''):
     ''' codes for phase and offsets'''
-    if phaseTies:
+    if phaseTies and 'NISAR' in sensor:
+        # yaml flat-earth mode: tiepoints -yaml, phase + offsets, no changeflat
+        myCodes = {'usePre': 'pys', 'useSuf': '', 'tiePre': 'py',
+                   'tieSuf': '', 'track': f' {track} '}
+    elif phaseTies:
         myCodes = {'usePre': 'pps', 'useSuf': 'uw', 'tiePre': 'pn',
                    'tieSuf': 'uw', 'track': f' {track} '}
     else:
@@ -491,10 +512,10 @@ def getTieInterval(pair, tieIntervalCodes, year):
 
 
 def processNDays(fout, pairs, track, tracknum, nDays, year, flags, phaseTies,
-                 tieIntervalCodes):
+                 tieIntervalCodes, sensor=''):
     ''' write tie_plan for each use,  .... tiefile orbitdnDays....'''
     #
-    codes = tieCodes(phaseTies, tracknum)
+    codes = tieCodes(phaseTies, tracknum, sensor=sensor)
     #
     # setup new subdir
     print(f'\nsubdir {track} nDays={nDays}', file=fout)
@@ -640,7 +661,8 @@ def main():
     flags = getFlags(track, header, year)
     #
     # find pairs for years, sort into dicts, with indxing by nDays
-    pairs, nDays = getPairs(int(year), phaseTies, winterTies, region, framePattern)
+    pairs, nDays = getPairs(int(year), phaseTies, winterTies, region,
+                            sensor, maxDays, framePattern)
     #print(pairs, nDays)
     #u.myerror('ffff')
     # print(nDays)
@@ -666,7 +688,8 @@ def main():
     #u.myerror('ffff')
     for nDay in nDays:
         orbGroups = processNDays(fout, pairs[nDay], track, tracknum, nDay,
-                                 year, flags, phaseTies, tieIntervalCodes)
+                                 year, flags, phaseTies, tieIntervalCodes,
+                                 sensor=sensor)
         
         allOrbGroups.append(orbGroups)
     #

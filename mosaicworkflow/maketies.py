@@ -96,7 +96,8 @@ def makeTiesArgs(year):
             '  7) Checks size and existence of offset files - if error, will\n'
             '     ## with error message\n'
             '  8) Handle special cases with tie_planSpecial[-track] and add\n'
-            '     empty "Special" file to affected directory'
+            '     empty "Special" file to affected directory\n'
+            '\nPart of the mosaicworkflow package.'
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -133,17 +134,26 @@ def makeTiesArgs(year):
 def getSensorTrackInfo():
     #
     # assumes in SensorXX/region/track-tracknum
-    cwd = os.environ['PWD']
+    cwd = os.getcwd()
     track = cwd.split('/')[-1]
     # e.g., Jak, ikeq
     region = cwd.split('/')[-2]
     tracknum = track.split('-')[-1]
     #
-    # figure out sensor: first check for sensor.yaml one level above cwd,
-    # then fall back to checking the cwd path
-    sensorYaml = os.path.join(os.path.dirname(cwd), 'sensor.yaml')
+    # figure out sensor: check project.yaml one level above cwd (preferred),
+    # fall back to sensor.yaml, then fall back to checking the cwd path
+    parentDir = os.path.dirname(cwd)
+    projectYaml = os.path.join(parentDir, 'project.yaml')
+    legacyYaml = os.path.join(parentDir, 'sensor.yaml')
+    if os.path.isfile(projectYaml):
+        sensorYaml = projectYaml
+    elif os.path.isfile(legacyYaml):
+        u.mywarning('sensor.yaml found but project.yaml expected — rename to project.yaml')
+        sensorYaml = legacyYaml
+    else:
+        sensorYaml = None
     sensor = None
-    if os.path.isfile(sensorYaml):
+    if sensorYaml is not None:
         with open(sensorYaml, 'r') as f:
             sensorData = yaml.safe_load(f)
         sensor = sensorData.get('sensor', None)
@@ -158,7 +168,7 @@ def getSensorTrackInfo():
         elif 'ALOS2' in cwd:
             sensor = 'ALOS2'
         elif 'NISAR' in cwd:
-            sensor = 'NISARTest'
+            sensor = 'NISAR'
         else:
             u.myerror('invalid sensor make sure directory has TSX, or Sentinel1 '
                       'in path')
@@ -187,7 +197,7 @@ def main():
     # only use winter flag for coastal
     winterFlag = [' ', ' -winter '][winterTies and sensor == 'Sentinel1']
     phaseFlag = [' ', ' -phase '][phaseTies and
-                                  sensor in ['Sentinel1', 'ALOS2']]
+                                  sensor in ['Sentinel1', 'ALOS2', 'NISAR', 'NISARTest']]
     #
     if not os.path.isdir(tieDir+'/old'):
         try:

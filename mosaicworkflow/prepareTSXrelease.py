@@ -22,7 +22,8 @@ def setupCleanTSXArgs():
     ''' Handle command line args'''
     parser = argparse.ArgumentParser(description='\n\n\033[1mRun steps to '
                                      'produce a TSX or CSK release - '
-                                     'run in release dir \033[0m\n\n')
+                                     'run in release dir \033[0m\n\n',
+                                     epilog='Part of the mosaicworkflow package.')
     parser.add_argument('--track', type=int, default=-1, help='specify integer'
                         ' track number [*]')
     parser.add_argument('--firstdate', type=str, default='1900-01-31',
