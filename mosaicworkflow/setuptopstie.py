@@ -467,6 +467,16 @@ def getPrefix(imageDir, phaseTies):
     noUse = False
     if os.path.isfile(imageDir+'/Exclude'):
         prefix = '## Exclude '
+    elif os.path.isfile(imageDir+'/Exclude.pending'):
+        # Soft exclude: leave the segment ACTIVE in the plan (empty prefix, and
+        # bypass the checkOffsets test below) so tieScript re-evaluates it and
+        # CLEARS Exclude.pending on success -- or rewrites it on continued
+        # failure, where tieScript's own use_this_line=False keeps the segment
+        # out of the mosaic anyway. Commenting it out like a hard Exclude (as
+        # this did before) made the exclusion self-perpetuating: tieScript skips
+        # '#'-comment plan lines, so a pending frame was never re-tied and its
+        # stale marker was never removed or refreshed.
+        prefix = ''
     # if not Exclude, check offsets for existence/size
     elif os.path.isfile(imageDir+'/Special'):
         prefix = '## Special '

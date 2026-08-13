@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import os
 import sys
+import glob
 import argparse
 from subprocess import call
 import utilities as u
@@ -66,12 +67,31 @@ def getRefreshArgs():
         help='Run without prompt'
     )
     parser.add_argument(
+        '-noQuadFit', '--noQuadFit', action='store_true',
+        help='Pass --noQuadFit to tie_script to skip the -deltaBQ quadratic '
+             'baseline correction estimate'
+    )
+    parser.add_argument(
+        '--yaml', action='store_true',
+        help='Pass --yaml to maketies/tie_script to write rBaseline files in YAML format'
+    )
+    parser.add_argument(
         '--overWrite', action='store_true',
         help='Pass --overWrite to makeframetie.py to rerun existing products'
     )
     parser.add_argument(
         '--keepVz', action='store_true',
         help='Pass --keepVz to makeframetie.py to retain .vz and .vz.geodat files'
+    )
+    parser.add_argument(
+        '--useSquint', action='store_true',
+        help='Pass --useSquint to makeframetie.py (squint heading correction in mosaic3d '
+             'and tiepoints -motion)'
+    )
+    parser.add_argument(
+        '-nThreads', '--nThreads', type=int, default=24,
+        metavar='N',
+        help='Maximum tracks processed in parallel [24]'
     )
 
     args = parser.parse_args()
@@ -88,7 +108,7 @@ def getRefreshArgs():
     tiesOnly = args.tiesOnly
     velthumbsOnly = args.velthumbsOnly
 
-    flags = {'phaseFlag': '', 'winterFlag': ''}
+    flags = {'phaseFlag': '', 'winterFlag': '', 'noQuadFitFlag': '', 'yamlFlag': ''}
     if args.winter:
         flags['winterFlag'] = ' -winter '
     if args.phase:
@@ -97,17 +117,43 @@ def getRefreshArgs():
     if args.phaseAndOffsets:
         # NISAR mode: maketies gets -phase but makeframetie.py still runs
         flags['phaseFlag'] = ' -phase '
+    if args.noQuadFit:
+        flags['noQuadFitFlag'] = ' -noQuadFit '
+    if args.yaml:
+        flags['yamlFlag'] = ' --yaml '
 
     if velthumbsOnly and tiesOnly:
         u.myerror('Cannot use both velthumbsOnly and tiesOnly')
 
     usePrompt = not args.noPrompt
 
-    return years, toRun, tiesOnly, velthumbsOnly, flags, usePrompt, args.tieFiles, args.overWrite, args.keepVz
+    return years, toRun, tiesOnly, velthumbsOnly, flags, usePrompt, args.tieFiles, args.overWrite, args.keepVz, args.useSquint, args.nThreads
 
 
-def runTies(rundir, years, tiesOnly, velthumbsOnly, tieFiles, flags, overWrite, keepVz):
+def clearPendingExcludes(rundir):
+    """Fresh-start the SOFT excludes for a tie refresh: remove every
+    Exclude.pending under rundir's frame dirs so this refresh re-evaluates all
+    frames from scratch. tieScript re-creates Exclude.pending only for frames
+    whose baseline fit fails again this run (build_tie_file). Hard Exclude
+    files are deliberately left untouched -- those are permanent."""
+    removed = 0
+    for pend in glob.glob(os.path.join(rundir, '*_*', 'Exclude.pending')):
+        try:
+            os.remove(pend)
+            removed += 1
+        except OSError:
+            pass
+    if removed:
+        print(f'refreshties: cleared {removed} stale Exclude.pending under {rundir}')
+
+
+def runTies(rundir, years, tiesOnly, velthumbsOnly, tieFiles, flags, overWrite, keepVz,
+           useSquint=False):
     cwd = os.getcwd()
+    # Clear stale soft-excludes before maketies/setuptopstie build the tie plan,
+    # so a refresh always starts clean and only genuinely-failing frames end up
+    # marked pending again this run.
+    clearPendingExcludes(rundir)
     sensor = None
     projectYaml = os.path.join(cwd, 'project.yaml')
     legacyYaml = os.path.join(cwd, 'sensor.yaml')
@@ -175,8 +221,10 @@ def runTies(rundir, years, tiesOnly, velthumbsOnly, tieFiles, flags, overWrite, 
             command += f' ; popd ; cd {runTop}/tiepoints '
         overWriteFlag = ' --overWrite' if overWrite else ''
         keepVzFlag = ' --keepVz' if keepVz else ''
+        yamlFlag = flags['yamlFlag']
+        squintFlag = ' --useSquint' if useSquint else ''
         for year in years:
-            command += f'; makeframetie.py{overWriteFlag}{keepVzFlag} tie_plan{year}{suffix}'
+            command += f'; makeframetie.py{overWriteFlag}{keepVzFlag}{squintFlag}{yamlFlag} tie_plan{year}{suffix}'
     print(command)
     # print('suffix:',suffix)
     call(command, shell=True, executable='/bin/csh', stdout=fout, stderr=ferr)
@@ -185,20 +233,21 @@ def runTies(rundir, years, tiesOnly, velthumbsOnly, tieFiles, flags, overWrite, 
 
 
 def main():
-    years, toRun, tiesOnly, velthumbsOnly, flags, usePrompt, tieFiles, overWrite, keepVz = \
-        getRefreshArgs()
+    years, toRun, tiesOnly, velthumbsOnly, flags, usePrompt, tieFiles, overWrite, keepVz, \
+        useSquint, nThreads = getRefreshArgs()
     print(years)
     threads = []
 
     for runfile in toRun:
         thread = threading.Thread(target=runTies,
                                   args=[runfile, years, tiesOnly,
-                                        velthumbsOnly, tieFiles, flags, overWrite, keepVz])
+                                        velthumbsOnly, tieFiles, flags, overWrite, keepVz,
+                                        useSquint])
         threads.append(thread)
     #
     # prompt to run jobs
     #
-    u.runMyThreads(threads, 24, 'Refresh Ties ', prompt=usePrompt)
+    u.runMyThreads(threads, nThreads, 'Refresh Ties ', prompt=usePrompt)
 
 
 if __name__ == '__main__':

@@ -123,12 +123,23 @@ def makeTiesArgs(year):
         metavar='FILE',
         help='YAML file with time-varying tiepoints'
     )
+    parser.add_argument(
+        '-noQuadFit', '--noQuadFit', action='store_true',
+        help='Pass --noQuadFit to tie_script to skip the -deltaBQ quadratic '
+             'baseline correction estimate'
+    )
+    parser.add_argument(
+        '--noYaml', action='store_true',
+        help='Write text (not YAML) rBaseline/az.est files. Default is YAML '
+             '(tie_script --yaml), which is now the standard for this workflow.'
+    )
 
     args = parser.parse_args()
 
     years = args.years if args.years else defaultYears
     print(years, file=sys.stderr)
-    return years, args.run, args.winter, multiTrack, args.phase, args.tieFiles
+    return (years, args.run, args.winter, multiTrack, args.phase, args.tieFiles,
+            args.noQuadFit, not args.noYaml)
 
 
 def getSensorTrackInfo():
@@ -192,8 +203,11 @@ def main():
     print(sensor, region, track, tracknum, tieDir, year)
     #
     # get Args
-    years, runTies, winterTies, multiTrack, phaseTies, tieFiles = \
+    years, runTies, winterTies, multiTrack, phaseTies, tieFiles, noQuadFit, useYaml = \
         makeTiesArgs(year)
+    tieScriptFlags = ' --noQuadFit' if noQuadFit else ''
+    if useYaml:
+        tieScriptFlags += ' --yaml'
     # only use winter flag for coastal
     winterFlag = [' ', ' -winter '][winterTies and sensor == 'Sentinel1']
     phaseFlag = [' ', ' -phase '][phaseTies and
@@ -266,17 +280,17 @@ def main():
         os.rename(tie_plan, tie_plan1)
         # only add entries for cases where there were images
         if nImages > 0:
-            print('# '+str(year)+'\ntie_script ', tie_plan, file=fRun)
+            print('# '+str(year)+'\ntie_script ' + tie_plan + tieScriptFlags, file=fRun)
     #
     # make tie_planAll
     #
     makeAll(tieAll, tieDir, tracknum, region in multiTrack)
     #
-    print('# All \ntie_script '+tieAll.split('/')[-1], file=fRun)
+    print('# All \ntie_script '+tieAll.split('/')[-1]+tieScriptFlags, file=fRun)
     #
     print(tieSpecial)
     if os.path.isfile(tieSpecial):
-        print('# Special \ntie_script '+tieSpecial, file=fRun)
+        print('# Special \ntie_script '+tieSpecial+tieScriptFlags, file=fRun)
         #
     print('# end', file=fRun)
     fRun.close()

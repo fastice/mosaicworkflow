@@ -7,11 +7,86 @@ Created on Mon Feb  3 08:45:12 2020
 """
 
 import argparse
+import sys
 import utilities as u
 import os
 from datetime import datetime, timedelta, date
 from subprocess import call
 import mosaicfunc as mosf
+
+
+# Keys understood in mosaic.template.yaml (and, for sepAscDesc/projectFile,
+# optionally in project.yaml -- see setupquarters.resolveSepAscDesc). This
+# list is informational only, kept by hand since the schema isn't read from
+# a single place in the code.
+TEMPLATE_KEYS = [
+    ('Required', [
+        ('dem', None, 'DEM file (overridable via --dem)'),
+        ('xll', None, 'lower-left x coordinate (km)'),
+        ('yll', None, 'lower-left y coordinate (km)'),
+        ('sx', None, 'mosaic width (pixels)'),
+        ('sy', None, 'mosaic height (pixels)'),
+        ('dx', None, 'pixel spacing in x (km)'),
+        ('dy', None, 'pixel spacing in y (km)'),
+        ('nx', None, 'number of pieces to section the mosaic into (x)'),
+        ('ny', None, 'number of pieces to section the mosaic into (y)'),
+        ('regionID', None, 'region identifier'),
+        ('baseFlags', None, 'flags passed to mosaic3d (overridable via --baseFlags)'),
+    ]),
+    ('Optional, overridable via matching command line flag', [
+        ('lsFile', 'None', 'Landsat input file for mosaic period'),
+        ('outputMask', 'None', 'shapefile for final output mask'),
+        ('mosaicMask', 'None', 'mask passed to mosaic3d (shelfMask)'),
+        ('inputFile', 'None', 'input file with SAR inputs'),
+    ]),
+    ('Optional, projection/region', [
+        ('epsg', 'None', 'EPSG code; may be omitted if wktFile is given'),
+        ('wktFile', 'None', 'WKT projection file (takes precedence over epsg)'),
+        ('regionFile', None, 'path to a separate region-definition yaml; its keys '
+                              '(epsg/wktFile/dem/velMap/sigmaShape) are merged into '
+                              'the template'),
+        ('velMap', None, 'velocity map for region (warned if missing and no regionFile)'),
+        ('sigmaShape', None, 'sigma shapefile for region (warned if missing and no regionFile)'),
+    ]),
+    ('Optional, preview image labeling', [
+        ('xLabel', None, 'x pixel offset for credit label on preview image'),
+        ('yLabel', None, 'y pixel offset for credit label on preview image '
+                          '(both xLabel and yLabel must be set, else labeling is skipped)'),
+    ]),
+    ('Optional, ascending/descending pairing (see setupquarters.resolveSepAscDesc)', [
+        ('sepAscDesc', 'True (mosaic3d default)',
+         'False adds -noSepAscDesc to baseFlags; None defers to project.yaml; '
+         'errors if it contradicts -noSepAscDesc already present in baseFlags'),
+        ('projectFile', 'None (search upward from the template for project.yaml)',
+         'explicit path to project.yaml, resolved relative to the template\'s own '
+         'directory if not absolute; must exist if given'),
+    ]),
+    ('Optional, squint correction (see setupquarters.resolveUseSquint)', [
+        ('useSquint', 'False (program default)',
+         'True appends -useSquint to baseFlags; False leaves it off; '
+         'None defers to project.yaml useSquint key; '
+         'template takes precedence over project.yaml'),
+    ]),
+    ('Optional, crossing-orbit time thresholds (see setupquarters.resolveNumericBaseFlag)', [
+        ('timeThresh', 'mosaic3d default (12 days)',
+         'Max days between crossing-orbit offset pairs; appends -timeThresh N to baseFlags; '
+         'template takes precedence over project.yaml'),
+        ('timePhaseThresh', 'mosaic3d default (548 days)',
+         'Max days between crossing-orbit phase pairs; appends -timePhaseThresh N to baseFlags; '
+         'template takes precedence over project.yaml'),
+    ]),
+]
+
+
+def printTemplateKeys():
+    ''' Print all keys understood in mosaic.template.yaml, with defaults '''
+    print('\nKeys understood in mosaic.template.yaml:\n')
+    for section, keys in TEMPLATE_KEYS:
+        print(f'{section}:')
+        for key, default, description in keys:
+            defaultStr = '' if default is None else f' [default: {default}]'
+            print(f'  {key}{defaultStr}\n      {description}')
+        print()
 
 
 def makemosaicArgs():
@@ -62,11 +137,29 @@ def makemosaicArgs():
                         help='template that defines mosaic')
     parser.add_argument('--noLabel', action='store_true', default=False,
                         help='No processing source label')
+    parser.add_argument('--metaOnly', action='store_true', default=False,
+                        help='Rebuild shapefiles and metadata only; '
+                        'skip masking, interpolation, and tif/vrt generation')
+    parser.add_argument('--useSquint', action='store_true', default=False,
+                        help='Pass -useSquint to mosaic3d (overrides template/project.yaml)')
+    parser.add_argument('--timeThresh', type=float, default=None,
+                        help='Max days between crossing-orbit offset pairs (mosaic3d default 12)')
+    parser.add_argument('--timePhaseThresh', type=float, default=None,
+                        help='Max days between crossing-orbit phase pairs (mosaic3d default 548)')
     parser.add_argument('--mosaicsSetupFile', type=str,
                         default='mosaicsSetup.yaml',
                         help='yaml with seasonal and mask information')
+    parser.add_argument('--nThreads', type=int, default=24,
+                        help='max number of parallel sector threads (default 24)')
+    parser.add_argument('--listTemplateKeys', action='store_true', default=False,
+                        help='Print all keys understood in mosaic.template.yaml, '
+                        'with defaults, and exit')
     #
     args = parser.parse_args()
+    #
+    if args.listTemplateKeys:
+        printTemplateKeys()
+        sys.exit(0)
     #
     mosaicsSetup = mosf.readYaml(args.mosaicsSetupFile, returnEmpty=True)
     if args.landsatPath is not None or 'landsatPath' not in mosaicsSetup:
@@ -91,7 +184,11 @@ def makemosaicArgs():
               'outputMask': args.outputMask,
               'keepFast': args.keepFast, 'baseFlags': args.baseFlags,
               'noLandsat': args.noLandsat, 'fitType': args.LSFitType,
-              'noLabel': args.noLabel}
+              'noLabel': args.noLabel, 'metaOnly': args.metaOnly,
+              'useSquint': args.useSquint,
+              'timeThresh': args.timeThresh,
+              'timePhaseThresh': args.timePhaseThresh,
+              'nThreads': args.nThreads}
     return myArgs
 
 
@@ -259,7 +356,9 @@ def makeCommand(firstDate, lastDate, mergedList, mosaicMaskFile, myArgs):
     ''' setup and return command '''
     #
     outputMaskArg, templateArg, lsArg, baseFlagsArg, keepFastFlag, \
-        mosaicMaskArg, noReprocessFlag, noTSXFlag, noLabelFlag = [''] * 9
+        mosaicMaskArg, noReprocessFlag, noTSXFlag, noLabelFlag, \
+        metaOnlyFlag, useSquintFlag, timeThreshArg, timePhaseThreshArg, \
+        nThreadsArg = [''] * 14
     #
     noReprocessFlag = {False: '', True: '--noReprocess'}[myArgs["noReprocess"]]
     #
@@ -292,6 +391,16 @@ def makeCommand(firstDate, lastDate, mergedList, mosaicMaskFile, myArgs):
         keepFastFlag = '--noCull '
     if myArgs["noLabel"]:
         noLabelFlag = '--noLabel '
+    if myArgs["metaOnly"]:
+        metaOnlyFlag = '--metaOnly '
+    if myArgs.get('useSquint', False):
+        useSquintFlag = '--useSquint '
+    if myArgs.get('timeThresh') is not None:
+        timeThreshArg = f'--timeThresh {myArgs["timeThresh"]} '
+    if myArgs.get('timePhaseThresh') is not None:
+        timePhaseThreshArg = f'--timePhaseThresh {myArgs["timePhaseThresh"]} '
+    if myArgs.get('nThreads') is not None:
+        nThreadsArg = f'--nThreads {myArgs["nThreads"]} '
     # TSX excluded from single sycle data
     if myArgs["interval"] == 's1cycle' or myArgs["interval"] == 's1-12day':
         noTSXFlag = ' --noTSX'
@@ -301,7 +410,12 @@ def makeCommand(firstDate, lastDate, mergedList, mosaicMaskFile, myArgs):
         f'--firstdate {firstDate.strftime("%Y-%m-%d")} ' \
         f' --lastdate {lastDate.strftime("%Y-%m-%d")} ' \
         f'{noReprocessFlag} {keepFastFlag} {noTSXFlag} {noLabelFlag} ' \
+        f'{metaOnlyFlag}' \
+        f'{useSquintFlag}' \
+        f'{timeThreshArg}' \
+        f'{timePhaseThreshArg}' \
         f'{baseFlagsArg}' \
+        f'{nThreadsArg}' \
         f'{outputMaskArg} '  \
         f'{mosaicMaskArg} ' \
         f'{inputFileArg} {lsArg} '
@@ -316,7 +430,7 @@ def main():
     myArgs = makemosaicArgs()
     #
     if myArgs['mosaicsSetup']['landsatPath'] is not None and \
-            not myArgs['noLandsat']:
+            not myArgs['noLandsat'] and not myArgs['metaOnly']:
         listFiles = getLists(myArgs['landsatPath'], fitType=myArgs['fitType'])
         mergedList = createMergedList(listFiles, myArgs['firstDate'],
                                       myArgs['lastDate'])
@@ -330,17 +444,31 @@ def main():
     # loop to produce products as defined by date range
     while currentLastDate <= myArgs['lastDate']:
         # get mask
-        mosaicMaskFile = getMosaicMask(myArgs['mosaicsSetup'],
-                                       myArgs['interval'],
-                                       currentFirstDate,
-                                       currentLastDate,
-                                       myArgs['keepFast'])
+        if not myArgs['metaOnly']:
+            mosaicMaskFile = getMosaicMask(myArgs['mosaicsSetup'],
+                                           myArgs['interval'],
+                                           currentFirstDate,
+                                           currentLastDate,
+                                           myArgs['keepFast'])
+        else:
+            mosaicMaskFile = None
         # setup command
         command = makeCommand(currentFirstDate, currentLastDate, mergedList,
                               mosaicMaskFile, myArgs)
         #
         if not myArgs['check']:
-            call(command, shell=True)  # , executable='/bin/csh')
+            returnCode = call(command, shell=True)  # , executable='/bin/csh'
+            # setupquarters.py exits nonzero if any sector's mosaic3d failed;
+            # stop here rather than march on and build more mosaics that may
+            # ship stale results.
+            if returnCode != 0:
+                print(f'\n\t\033[1;31m *** makemosaic: setupquarters.py '
+                      f'failed (exit {returnCode}) for '
+                      f'{currentFirstDate.strftime("%Y-%m-%d")} to '
+                      f'{currentLastDate.strftime("%Y-%m-%d")}; stopping before '
+                      f'building further mosaics. Check the Vel-* io/ logs. '
+                      f'*** \033[0m\n')
+                sys.exit(1)
         # update dates
         if 'multiYear' in myArgs['interval']:
             break  # multi Year one off product

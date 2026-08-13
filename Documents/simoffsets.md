@@ -23,9 +23,12 @@ Must be run in the pair processing directory. The second image is located automa
 | `-syncDat` | False | Force re-run of `siminsar`; use `offsetsDat` to define output grid size. |
 | `-noVel` | False | Compute offsets assuming zero velocity everywhere (geometry only). |
 | `-fastMask` | False | Use the fast-ice mask instead of the standard ice mask. |
+| `--iceMask` / `-iceMask` | False | Use the binary ice-extent mask (`icemask` field in region YAML, e.g. `GimpIceMask_90m`) instead of the tracking mask. Values: **0 = not ice, 1 = ice**. |
+| `--iceRockWaterMask` / `-iceRockWaterMask` | False | Use the ice-rock-water mask (`icerockwatermask` field in region YAML, e.g. `IceRock90m.tif`) instead of the tracking mask. Values: **0 = water, 1 = rock, 2 = ice**. Overrides `-fastMask`. Used by `ROFFtoGrimp` for `offsets.geom` to produce a mask for ionosphere rock-pixel pre-fill. |
 | `-LSB` | False | Write output in LSB byte order (default MSB). |
 | `-velMap FILE` | region default | Velocity map root name (`.vx`/`.vy` suffixes appended) or `.vrt`/`.tif` path. |
 | `-dem FILE` | region default | DEM file. |
+| `-verticalCorrection FILE` | None | Vertical correction (submergence/emergence) grid, m/yr ice-equivalent, scalar GeoTIFF — same grid passed to `siminsar -verticalCorrection`. Ignored if `-noVel` is set. |
 | `-region NAME` | auto | Region name (`greenland` or `antarctica`). Auto-detected from geodat latitude if not given. |
 | `-regionFile FILE` | None | YAML file with region-specific paths (velMap, DEM, mask etc.). |
 | `-secondDir DIR` | `../secondslcdir` | Directory of the secondary image. Auto-detected from `*.slc` symlink. |
@@ -90,6 +93,22 @@ where:
 
 Missing pixels (`dr0 < −2×10⁸`) are set to `−2×10⁹` in both components.
 
+### 5. Vertical correction (`computeVerticalCorrectionOffset`)
+
+If `-verticalCorrection FILE` is given (and `-noVel` is not set), the LOS contribution of the
+vertical-correction (submergence/emergence) grid is subtracted from `dr`:
+
+```
+dr -= dzdtSubmergence × cosPsi × deltaT/365.25 / slpR
+```
+
+where `dzdtSubmergence` (m/yr) is bilinearly interpolated from the grid at each pixel's lat/lon
+(values `<= -100` or NaN are treated as 0, matching `interpVCorrect.c`'s `MINVCORRECT` sentinel),
+and `cosPsi = sqrt(1 - sinPsi**2)` with `sinPsi` from `computeSinPsi`. The subtraction (rather than
+addition) matches the sign convention chosen for `siminsar -verticalCorrection`'s phase case, so
+that `mosaic3d`'s `+=` (`make3DOffsets.c`) removes the contribution correctly on the inverse pass.
+Vertical motion has no azimuth-direction LOS component, so `da` is unaffected.
+
 ---
 
 ## Freestanding programs called
@@ -131,7 +150,8 @@ All outputs use root name derived from `-azOffsets` (default `offsets`):
 | `offsets.poly` | Linear polynomial coefficients for range and azimuth static offsets |
 | `offsets.lat` | Latitude array (from siminsar, if regenerated) |
 | `offsets.lon` | Longitude array (from siminsar, if regenerated) |
-| `offsets.mask` | Ice mask array (from siminsar, if regenerated) |
+| `offsets.mask` | Ice mask array (from siminsar, if regenerated). With the default tracking mask: **0 = not ice, 1 = standard tracking ice, 5 = fast tracking ice** (speed > 200 m/yr). With `--iceRockWaterMask`: **0 = water, 1 = rock, 2 = ice** (IceRock90m). |
+| `offsets.mask.vrt` | Single-band VRT wrapper for `offsets.mask`. |
 | `offsets.simdat` | Simulation metadata (from siminsar, if regenerated) |
 | `fail.simoffsets` | Created at start, removed on successful completion; presence indicates failure |
 
@@ -156,6 +176,8 @@ All outputs use root name derived from `-azOffsets` (default `offsets`):
 | `computePlane(x, y, z)` | Least-squares fit of `const + x·c1 + y·c2` to valid points. |
 | `fixBad(d, coeff, r1, a1)` | Replace outliers (residual > 2 px) with plane value. |
 | `computeVelocityRA(velMap, offsets1, srsInfo)` | Interpolate velocity map; rotate to radar frame; flag fast areas. |
+| `computeSinPsi(offsets)` | sin of the local incidence angle, from look-angle geometry. |
 | `groundToSlantRangeResolution(offsets)` | Convert ground-range to slant-range pixels using look angle geometry. |
+| `computeVerticalCorrectionOffset(vcFile, offsets1, srsInfo, deltaT)` | LOS contribution of the vertical-correction grid to the range offset, in slant-range pixels. |
 | `LLtoRA(lat, lon, geodatFile, dem)` | Call `lltora` binary to project lat/lon → range/azimuth; return 2D arrays. |
 | `writeOffPoly(fileName, coeffR, coeffA)` | Write polynomial coefficients to text file. |

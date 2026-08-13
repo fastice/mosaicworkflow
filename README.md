@@ -26,6 +26,25 @@ Outputs are all the final archive-ready products that get delivered to NSIDC.
 
 **RUNWtoGrimp** Pre-process a NISAR *RUNW* product to apply masks (e.g., connected components) and corrections (e.g., ionosphere) and output the result as binary file along with a geojson file containing relevant metadata. 
 
+## Documentation
+
+- [setupquarters](Documents/setupquarters.md) — single-cycle/monthly/quarterly/annual mosaic generation
+- [makemosaic](Documents/makemosaic.md) — time-series mosaic preprocessing and postprocessing
+- [maketies](Documents/maketies.md) — tie-point generation
+- [refreshties](Documents/refreshties.md) — tie-point refresh workflow
+- [setuptopstie](Documents/setuptopstie.md) — Sentinel-1 TOPS tie-point setup
+- [makeframetie](Documents/makeframetie.md) — frame tie-point construction
+- [simoffsets](Documents/simoffsets.md) — simulate range/azimuth offsets from velocity and DEM
+- [grepdate](Documents/grepdate.md) — report SAR image pair processing status for a given year
+- [makevelnoclean](Documents/makevelnoclean.md) — reproduce velocity directories without culling
+- [makevelstatsregions](Documents/makevelstatsregions.md) — velocity statistics by region
+- [makeimagemosics](Documents/makeimagemosics.md) — image mosaic time-series workflow (note: filename is `makemosaic` variant)
+- [mergeoff](Documents/mergeoff.md) — merge slow and fast speckle-tracked offsets for a SAR image pair
+- [autoclean](Documents/autoclean.md) — automatic cleanup of intermediate files
+- [cleanoffmerge](Documents/cleanoffmerge.md) — clean and merge offset products
+- [initRAReference](Documents/initRAReference.md) — initialise range/azimuth reference
+- [velocityStats](Documents/velocityStats.md) — velocity statistics utilities
+
 ## For Further Information
 
 Please address questions to ![](https://github.com/fastice/GrIMPTools/blob/main/Email.png).

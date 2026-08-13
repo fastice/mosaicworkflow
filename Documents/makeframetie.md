@@ -19,6 +19,7 @@ makeframetie.py [options] tie_plan
 | `tie_plan` | Tie-plan file to process (e.g. `tie_plan2024` or `tie_plan2024-26` for TSX multi-track). |
 | `--overWrite` | Pass `--overWrite` to `vel_thumbs` to rerun existing products. |
 | `--keepVz` | Pass `--keepVz` to `vel_thumbs` to retain `.vz` and `.vz.geodat` files. |
+| `--useSquint` | Pass `--useSquint` to `tie_script` (squint heading correction in `mosaic3d` and `tiepoints -motion`; see `mosaicSource/CLAUDE.md` "Squint"). |
 
 ---
 

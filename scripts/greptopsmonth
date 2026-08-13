@@ -1,0 +1,51 @@
+#
+# grep date data for month year, and put info in $3 - helper for grep date
+#
+set files=`ls *_$4/geodat10x2.in`
+#
+set tmp=tmpz.$$
+#
+foreach file ($files)
+   set hit=`grep -i date $file | grep $1 | grep -i $2 `
+   if($#hit > 1) then
+     set d=`echo $file | awk '{split($1,m,"/"); print(m[1])}'`
+     set slc='-'
+     set slcf=$d/$d".slc"
+     if(-e $slcf) then
+	 set slc='+'
+     endif
+       set doy=`date --date "$hit[4] $hit[5] $hit[6]"  +%j`
+     if(-e $d/azimuth.offsets) then
+	set thumbs='-'
+       if(-e $d/velocity) set thumbs='v'
+
+       if(-e $d/fast ) then
+	  if(-e $d/fast/azimuth.offsets.fast ) then
+             echo 'xf'$thumbs $d '\t' $hit[4] $hit[5] $hit[6] $slc $doy >> $tmp
+	  else
+             echo 'x.'$thumbs $d '\t' $hit[4] $hit[5] $hit[6] $slc $doy >> $tmp
+	  endif
+       else
+         echo 'x-'$thumbs $d '\t' $hit[4] $hit[5] $hit[6] $slc $doy  >> $tmp
+       endif
+     else
+       if(-e $d/runboth) then
+          echo '.-- ' $d '\t' $hit[4] $hit[5] $hit[6] $slc $doy  >> $tmp
+        else
+          echo 'o-- ' $d '\t' $hit[4] $hit[5] $hit[6] $slc $doy  >> $tmp
+	endif
+     endif
+   endif
+end
+#
+# sort results if they were found
+#
+if(-e $tmp) then
+  sort -k4 $tmp >> $3
+  rm $tmp
+endif
+#
+
+
+
+

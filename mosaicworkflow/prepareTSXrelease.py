@@ -223,7 +223,8 @@ def getOffsetsToUse(track, firstDate, lastDate, deliveredList, sensor):
                                     '%b:%d:%Y')
         myDate2 = datetime.strptime(myMeta['Second Image Date (MM:DD:YYYY)'],
                                     '%b:%d:%Y')
-        Exclude = os.path.exists(velDir.replace('velocity', 'Exclude'))
+        Exclude = (os.path.exists(velDir.replace('velocity', 'Exclude')) or
+                   os.path.exists(velDir.replace('velocity', 'Exclude.pending')))
         productDir = f'Vel.{myDate1.strftime("%Y-%m-%d")}.' \
             f'{myDate2.strftime("%Y-%m-%d")}'
         # Skip those marked Exclude or already delivered

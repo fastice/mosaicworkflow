@@ -42,7 +42,6 @@ def getSensorInfo(tiePlanFile):
             sensorData = yaml.safe_load(f)
         yamlSensor = sensorData.get('sensor', None)
         framePattern = sensorData.get('framePattern', '*')
-        print(f'\033[1;31mDEBUG: read framePattern={framePattern!r} from {yamlFile}\033[0m')
         if yamlSensor is not None:
             if yamlSensor in ['TSX', 'CSK']:
                 trackdirs = sorted(d.rstrip('/') for d in glob.glob('../track-*/'))
@@ -162,11 +161,29 @@ def main():
         '--keepVz', action='store_true',
         help='Pass --keepVz to vel_thumbs to retain .vz and .vz.geodat files'
     )
+    parser.add_argument(
+        '--noYaml', action='store_true',
+        help='Write text (not YAML) rBaseline/az.est files. Default is YAML '
+             '(tie_script --yaml), which is now the standard for this workflow.'
+    )
+    parser.add_argument(
+        '--useSquint', action='store_true',
+        help='Pass --useSquint to tie_script (squint heading correction in mosaic3d '
+             'and tiepoints -motion)'
+    )
+    parser.add_argument(
+        '--tiff', action='store_true',
+        help='Pass --tiff to vel_thumbs so per-segment velocity products are '
+             'written as GeoTIFF (mosaic3d -GTiff) instead of binary'
+    )
 
     args = parser.parse_args()
     tiePlanFile = args.tiePlan
     overWriteFlag = ' --overWrite' if args.overWrite else ''
     keepVzFlag = ' --keepVz' if args.keepVz else ''
+    yamlFlag = '' if args.noYaml else ' --yaml'
+    squintFlag = ' --useSquint' if args.useSquint else ''
+    tiffFlag = ' --tiff' if args.tiff else ''
 
     headers = ['extraties', 'DEM', 'track_root', 'base_nlooks',
                'default_nDays', 'extra_flags']
@@ -207,6 +224,7 @@ def main():
             u.myerror('could not open output file ' + tiefile + ': check path  ')
         tieString = ''
         subString = ''
+        useString = ''
         for line in iter(fin):
             # set this flag to true when a line processed, so it can be
             # skipped in subsequent steps
@@ -239,12 +257,16 @@ def main():
                 # print('\n\ttiefile '+frameRange+'d'+str(nDays),
                 # end='\n', file=fout)
                 # proc
+                useString = ''
             if not processed:
                 pieces = line.split()
+                if len(pieces) == 2 and pieces[0] == 'use':
+                    useString = '\n\tuse ' + pieces[1] + '\n'
+                    processed = True
                 if len(pieces) >= 3:
                     pieces[0].strip()
                     frame = pieces[1]
-                    if len(pieces[0]) == 1 and pieces[0].find('n') != -1:
+                    if pieces[0] in ('s', 'n', 'py', 'pys'):
                         frame_str = pieces[2].split('_')[-1][len(framePrefix):]
                         if not frame_str:
                             continue  # frame shorter than prefix, not a virtual-frame entry
@@ -254,6 +276,9 @@ def main():
                             if len(subString) > 0:
                                 print(subString, end='', file=fout)
                                 subString = ''
+                            if len(useString) > 0:
+                                print(useString, end='', file=fout)
+                                useString = ''
                             if len(tieString) > 0:
                                 print(tieString, end='', file=fout)
                                 s = tieString.replace('tiefile', '').strip()
@@ -261,7 +286,7 @@ def main():
                                 all.append(s)
                                 tieString = ''
                             print('\t\t' + line.lstrip(), end='', file=fout)
-                if len(pieces) == 2:
+                if not processed and len(pieces) == 2:
                     if (pieces[0].find('tiefile') != -1 and
                             pieces[1].find('all') != -1):
                         allRoot = pieces[1].strip()
@@ -294,8 +319,8 @@ def main():
             fin.close()
             fout.close()
             #
-            call('tie_script  ' + tiefile, shell=True)
-            call('vel_thumbs' + overWriteFlag + keepVzFlag + ' ' + thumbfile, shell=True)
+            call('tie_script' + squintFlag + yamlFlag + '  ' + tiefile, shell=True)
+            call('vel_thumbs' + overWriteFlag + keepVzFlag + tiffFlag + ' ' + thumbfile, shell=True)
         else:
             u.myalert('No data for ' + tiefile)
 

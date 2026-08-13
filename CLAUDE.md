@@ -218,3 +218,9 @@ TSX (TerraSAR-X) data is treated specially:
 - Date overlap with the mosaic period
 - At least 60% coverage (`percentCover >= 0.6`)
 - Center date within half a window width of the mosaic center
+
+## Squint correction (`--useSquint`)
+
+`refreshties.py` and `makeframetie.py` both accept `--useSquint`, which threads through to `tie_script` (i.e. `insarworkflow.tieScript`), which in turn passes `-useSquint` to both `mosaic3d` and `tiepoints -motion`. Default off; can also be set project-wide via `applySquintCorrection: true` in `project.yaml` and overridden per-run by `setupNISARTracks --useSquint`/`--noUseSquint`.
+
+See `mosaicSource/CLAUDE.md` "Squint (residual Doppler) sensitivity" for the C-side implementation and why this is off by default.

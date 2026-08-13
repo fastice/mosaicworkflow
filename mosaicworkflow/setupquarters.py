@@ -19,6 +19,7 @@ from PIL import ImageFont
 from PIL import ImageDraw
 import gc
 import json
+import yaml
 # Currently this is hardwired here since this program only works for greenland.
 # It could be used for future expansion to Antarctica I have tried to use it to
 # flag ice sheet specific stuff
@@ -78,6 +79,160 @@ def processTemplate(args):
     return template
 
 
+def findProjectYaml(startDir):
+    '''
+    Search upward from startDir for a project.yaml, the way a project root
+    is normally located elsewhere in this package (e.g. makeframetie.py),
+    but without assuming a fixed directory depth -- mosaic.template.yaml
+    can live at varying depths under the project root (e.g.
+    Release/velocity/all/ vs Release/velocity/roffsets/).
+    '''
+    d = os.path.abspath(startDir)
+    while True:
+        candidate = os.path.join(d, 'project.yaml')
+        if os.path.isfile(candidate):
+            return candidate
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None
+        d = parent
+
+
+def locateProjectYaml(template, templatePath):
+    '''
+    Find project.yaml. An explicit template['projectFile'] always wins --
+    it's better to be specific than rely on inference -- resolved relative
+    to the template's own directory if it's not already absolute, and
+    required to exist (a typo in an explicit path should fail loudly, not
+    silently fall back to the search). Falls back to the upward search in
+    findProjectYaml() when projectFile isn't given.
+    '''
+    projectFile = template.get('projectFile', None)
+    if projectFile is not None:
+        if not os.path.isabs(projectFile):
+            projectFile = os.path.join(os.path.dirname(os.path.abspath(templatePath)), projectFile)
+        if not os.path.isfile(projectFile):
+            u.myerror(f'locateProjectYaml: template projectFile {projectFile} not found')
+        return projectFile
+    return findProjectYaml(os.path.dirname(os.path.abspath(templatePath)))
+
+
+def resolveSepAscDesc(template, templatePath):
+    '''
+    Resolve the sepAscDesc setting from project.yaml and the template, and
+    reconcile it with mosaic3d's -noSepAscDesc flag if it's already present
+    in baseFlags (someone can always put it there directly, since baseFlags
+    is a free-form passthrough).
+
+    template's value takes precedence over project.yaml's; template may be
+    left None (e.g. as a reminder placeholder) to defer to project.yaml.
+    If neither sets it, mosaic3d's own default (sepAscDesc=True) applies.
+    '''
+    templateSepAscDesc = template.get('sepAscDesc', None)
+    projectSepAscDesc = None
+    projectYamlPath = locateProjectYaml(template, templatePath)
+    if projectYamlPath is not None:
+        with open(projectYamlPath, 'r') as fp:
+            projectData = yaml.safe_load(fp) or {}
+        projectSepAscDesc = projectData.get('sepAscDesc', None)
+    #
+    if templateSepAscDesc is not None:
+        resolved = templateSepAscDesc
+        if projectSepAscDesc is not None and projectSepAscDesc != templateSepAscDesc:
+            u.mywarning(f'resolveSepAscDesc: template sepAscDesc={templateSepAscDesc} '
+                        f'overrides project.yaml sepAscDesc={projectSepAscDesc}')
+    elif projectSepAscDesc is not None:
+        resolved = projectSepAscDesc
+    else:
+        resolved = True  # mosaic3d's own default
+    #
+    baseFlagsHasNoSep = 'noSepAscDesc' in template['baseFlags']
+    if resolved is True and baseFlagsHasNoSep:
+        u.myerror('resolveSepAscDesc: inconsistent configuration -- sepAscDesc '
+                  'resolves to True (separate ascending/descending), but '
+                  'baseFlags already contains -noSepAscDesc. Remove one or '
+                  'the other.')
+    if resolved is False and not baseFlagsHasNoSep:
+        template['baseFlags'] += ' -noSepAscDesc '
+    return template
+
+
+def resolveUseSquint(template, templatePath, cliUseSquint=False):
+    '''
+    Resolve the useSquint setting from the CLI, template, and project.yaml, then
+    append -useSquint to baseFlags when enabled.
+
+    Priority (highest first):
+      1. CLI --useSquint flag (if passed, forces on regardless of yaml files)
+      2. template useSquint key (True/False/None; None defers to project.yaml)
+      3. project.yaml useSquint key
+      4. Program default: off
+
+    Template takes precedence over project.yaml; a warning is emitted when they
+    disagree. The program default (off) applies when neither yaml sets the key.
+    '''
+    if cliUseSquint:
+        useSquint = True
+    else:
+        templateUseSquint = template.get('useSquint', None)
+        projectUseSquint = None
+        projectYamlPath = locateProjectYaml(template, templatePath)
+        if projectYamlPath is not None:
+            with open(projectYamlPath, 'r') as fp:
+                projectData = yaml.safe_load(fp) or {}
+            projectUseSquint = projectData.get('useSquint', None)
+        if templateUseSquint is not None:
+            useSquint = templateUseSquint
+            if projectUseSquint is not None and projectUseSquint != templateUseSquint:
+                u.mywarning(f'resolveUseSquint: template useSquint={templateUseSquint} '
+                            f'overrides project.yaml useSquint={projectUseSquint}')
+        elif projectUseSquint is not None:
+            useSquint = projectUseSquint
+        else:
+            useSquint = False  # program default: off
+    if useSquint and '-useSquint' not in template['baseFlags']:
+        template['baseFlags'] += ' -useSquint'
+    return template
+
+
+def resolveNumericBaseFlag(template, templatePath, key, mosaic3dFlag, cliValue=None):
+    '''
+    Resolve a numeric mosaic3d flag from CLI, template, and project.yaml, then
+    append -mosaic3dFlag value to baseFlags when the resolved value is not None.
+
+    Priority (highest first):
+      1. CLI value (if not None, i.e. the user explicitly passed it)
+      2. template key (takes precedence over project.yaml when present)
+      3. project.yaml key
+      4. None -> mosaic3d uses its own compiled-in default; nothing appended
+
+    Template takes precedence over project.yaml; a warning is emitted when
+    they disagree.
+    '''
+    if cliValue is not None:
+        resolved = cliValue
+    else:
+        templateVal = template.get(key, None)
+        projectVal = None
+        projectYamlPath = locateProjectYaml(template, templatePath)
+        if projectYamlPath is not None:
+            with open(projectYamlPath, 'r') as fp:
+                projectData = yaml.safe_load(fp) or {}
+            projectVal = projectData.get(key, None)
+        if templateVal is not None:
+            resolved = templateVal
+            if projectVal is not None and projectVal != templateVal:
+                u.mywarning(f'resolveNumericBaseFlag {key}: template value {templateVal} '
+                            f'overrides project.yaml value {projectVal}')
+        elif projectVal is not None:
+            resolved = projectVal
+        else:
+            resolved = None
+    if resolved is not None:
+        template['baseFlags'] += f' -{mosaic3dFlag} {resolved}'
+    return template
+
+
 def processFlags(args, template):
     '''
     Create dictionary with relevant flags
@@ -85,7 +240,7 @@ def processFlags(args, template):
     flags = {}
     # Dates
     for flag in ['firstdate', 'lastdate', 'noTSX', 'noCull', 'check',
-                 'timeOverlapOff', 'noReprocess', 'noLabel']:
+                 'timeOverlapOff', 'noReprocess', 'noLabel', 'metaOnly', 'nThreads']:
         if flag in args:
             flags[flag] = getattr(args, flag)
         else:
@@ -101,6 +256,15 @@ def processFlags(args, template):
         u.myerror('processFlags: baseFlags not specified.')
     elif not flags['timeOverlapOff']:
         template['baseFlags'] += ' -timeOverlap '
+    template = resolveSepAscDesc(template, args.template)
+    template = resolveUseSquint(template, args.template,
+                                getattr(args, 'useSquint', False))
+    template = resolveNumericBaseFlag(template, args.template, 'timeThresh',
+                                     'timeThresh',
+                                     cliValue=getattr(args, 'timeThresh', None))
+    template = resolveNumericBaseFlag(template, args.template, 'timePhaseThresh',
+                                     'timePhaseThresh',
+                                     cliValue=getattr(args, 'timePhaseThresh', None))
     return flags
 
 
@@ -145,6 +309,11 @@ def processQArgs():
     parser.add_argument('--noLabel', action='store_true', default=False,
                         help='No source label')
     # flag
+    parser.add_argument('--metaOnly', action='store_true', default=False,
+                        help='Rebuild shapefiles and metadata (shp/spo/premet) '
+                        'only; skip masking, interpolation, tiff/vrt '
+                        'generation, and release tif rebuild')
+    # flag
     parser.add_argument('--noCull', action='store_true', default=False,
                         help='Use unculled offsets')
     # flag
@@ -154,6 +323,13 @@ def processQArgs():
     parser.add_argument('--baseFlags', type=None,
                         default=None,
                         help='Override default flags for the mosaicker')
+    # template/project.yaml
+    parser.add_argument('--useSquint', action='store_true', default=False,
+                        help='Pass -useSquint to mosaic3d (overrides template/project.yaml)')
+    parser.add_argument('--timeThresh', type=float, default=None,
+                        help='Max days between crossing-orbit offset pairs (mosaic3d default 12)')
+    parser.add_argument('--timePhaseThresh', type=float, default=None,
+                        help='Max days between crossing-orbit phase pairs (mosaic3d default 548)')
     # template
     parser.add_argument('--outputMask', type=str, default=None,
                         help='Shape mask for final output (shp)')
@@ -172,6 +348,8 @@ def processQArgs():
                         help='Landsat input file for mosaic period')
     parser.add_argument('--template', type=str, default='mosaic.template.yaml',
                         help='template that defines mosaic')
+    parser.add_argument('--nThreads', type=int, default=24,
+                        help='max number of parallel sector threads (default 24)')
     #
     args = parser.parse_args()
     template = processTemplate(args)
@@ -234,8 +412,9 @@ def processInputFileQ(filename, noTSX):
             parts = line.split()
             # get geodat
             geo = parts[1].strip()
-            exclude = "/".join(geo.split('/')[0:-2])+'/Exclude'
-            if not os.path.exists(exclude):
+            exclude_base = "/".join(geo.split('/')[0:-2])
+            if not os.path.exists(exclude_base+'/Exclude') and \
+                    not os.path.exists(exclude_base+'/Exclude.pending'):
                 mydate = getDateFromGeodat(geo)
                 count += 1
                 if count % 500 == 0:
@@ -756,7 +935,7 @@ def addLabel(rgb, template):
               'Produced using one or more of the following:',
               'Copernicus Sentinel 1 data processed by ESA',
               'TerraSAR-X/TanDEM-X data processed by DLR',
-              'Landsat 8 data processed by USGS']
+              'Landsat 8/9 data processed by USGS']
     # Remove GrIMP for non Greenland products
     if template['epsg'] != 3413:
         labels = labels[1:]
@@ -961,7 +1140,8 @@ def SatTypes(outDir, shapeFilesNames, currentDir=False):
     if not currentDir:
         u.pushd(f'{outDir}/release')
     # any records, record LS8 present
-    sTypes = {'S1A': False, 'S1B': False, 'TSX': False, 'TDX': False,
+    sTypes = {'S1A': False, 'S1B': False, 'S1C': False, 'S1D': False,
+              'TSX': False, 'TDX': False,
               'CSK': False, 'LS8': False, 'LS9': False, 'RADARSAT-1': False,
               'ALOS1-PALSAR': False, 'ERS-1/2': False}
     print(shapeFilesNames)
@@ -977,10 +1157,14 @@ def SatTypes(outDir, shapeFilesNames, currentDir=False):
     # check sar shapes
     if 'SAR' in shapeFilesNames:
         current = shapefile.Reader(shapeFilesNames['SAR'])
-        myDict = dict(zip([x[0] for x in current.fields],
-                          range(0, len(current.fields))))
+        myDict = dict(zip([x[0] for x in current.fields[1:]],
+                          range(len(current.fields) - 1)))
         for myRecord in current.records():
             sTypes[myRecord[myDict['SAT1']]] = True
+            if 'SAT2' in myDict:
+                sat2 = myRecord[myDict['SAT2']]
+                if sat2 in sTypes:
+                    sTypes[sat2] = True
         current = []
     if not currentDir:
         u.popd()
@@ -997,7 +1181,7 @@ def makeShapePremet(outDir, myShapeName,  shapeType, sTypes, firstDate,
     preMets = []
     # Split sar/optical platforms based on shapeType
     mySats = {'LS': ['LS8', 'LS9'],
-              'SAR': ['S1A', 'S1B', 'TSX', 'TDX', 'CSK']}
+              'SAR': ['S1A', 'S1B', 'S1C', 'S1D', 'TSX', 'TDX', 'CSK']}
     validPlatforms = {}
     for mySat in mySats[shapeType]:
         validPlatforms[mySat] = sTypes[mySat]
@@ -1043,22 +1227,14 @@ def makeFinalShapes(firstDate, lastDate):
 def makeFinalOutput(outDir, template, flags):
     ''' Call routines to build final outputs (e.g., release) '''
     print('Making Final ouputs...')
-    # setup release dir
     releaseDir = outDir+'/release'
-    # u.mywarning('uncomment prepare release')
-    prepareReleaseDir(releaseDir)
-    #
-    # switch to tiff dir and make single tiffs
-    # u.mywarning('uncomment process final')
-    processFinalVRTs(outDir, releaseDir, flags)
-    #
-    # this will assemble preview from pieces into single cog tif
-    print('Making preview....')
-    processFinalPreview(outDir, template, flags)
-    #
-    # Make final shape
+    if not flags.get('metaOnly'):
+        prepareReleaseDir(releaseDir)
+        processFinalVRTs(outDir, releaseDir, flags)
+        print('Making preview....')
+        processFinalPreview(outDir, template, flags)
+    # Make final shape (always runs — copies meta shapefiles into release/)
     u.pushd(releaseDir)
-    # copy shape files
     shapeFileNames = makeFinalShapes(flags['firstdate'], flags['lastdate'])
     u.popd()
     return shapeFileNames
@@ -1076,7 +1252,8 @@ def populatePremet(preMetData, firstDate, lastDate, validPlatforms={}):
     preMetData.append(s.premet({'End_time': '23:59:59.0000'}))
     CSKsens = {'CSK': 'X-SAR', 'CSKS1': 'X-SAR', 'CSKS2': 'X-SAR',
                'CSKS3': 'X-SAR', 'CSKS4': 'X-SAR'}
-    sensorShort = {'S1A': 'C-SAR', 'S1B': 'C-SAR', 'TSX': 'X-SAR',
+    sensorShort = {'S1A': 'C-SAR', 'S1B': 'C-SAR', 'S1C': 'C-SAR',
+                   'S1D': 'C-SAR', 'TSX': 'X-SAR',
                    'TDX': 'X-SAR', 'LS8': 'OLI', 'LS9': 'OLI-2',
                    'RADARSAT-1': 'C-SAR',
                    'ERS-1/2': 'C-SAR', 'ALOS1-PALSAR': 'PALSAR',
@@ -1084,7 +1261,8 @@ def populatePremet(preMetData, firstDate, lastDate, validPlatforms={}):
     sensorShort = {**CSKsens, **sensorShort}
     CSKinst = {'CSK': 'X-SAR', 'CSKS1': 'X-SAR', 'CSKS2': 'X-SAR',
                'CSKS3': 'X-SAR', 'CSKS4': 'X-SAR'}
-    instShort = {'S1A': 'C-SAR', 'S1B': 'C-SAR', 'TSX': 'X-SAR',
+    instShort = {'S1A': 'C-SAR', 'S1B': 'C-SAR', 'S1C': 'C-SAR',
+                 'S1D': 'C-SAR', 'TSX': 'X-SAR',
                  'TDX': 'X-SAR', 'LS8': 'OLI', 'LS9': 'OLI-2',
                  'RADARSAT-1': 'C-SAR',
                  'ERS-1/2': 'C-SAR', 'ALOS1-PALSAR': 'PALSAR',
@@ -1092,8 +1270,9 @@ def populatePremet(preMetData, firstDate, lastDate, validPlatforms={}):
     instShort = {**CSKinst, **instShort}
     cskIns = {'CSKS1': 'COSMO-SKYMED 1', 'CSKS2': 'X-SAR',
               'CSKS3': 'COSMO-SKYMED 3', 'CSKS4': 'COSMO-SKYMED 4'}
-    instrument = {'S1A': 'Sentinel-1A', 'S1B': 'Sentinel-1B', 'TSX': 'TSX',
-                  'TDX': 'TDX', 'CSK': 'COSMO-SKYMED',
+    instrument = {'S1A': 'Sentinel-1A', 'S1B': 'Sentinel-1B',
+                  'S1C': 'Sentinel-1C', 'S1D': 'Sentinel-1D',
+                  'TSX': 'TSX', 'TDX': 'TDX', 'CSK': 'COSMO-SKYMED',
                   'LS8': 'LANDSAT-8', 'LS9': 'LANDSAT-9',
                   'RADARSAT-1': 'RADARSAT-1', 'ERS-1/2': 'ERS-1-2',
                   'ALOS1-PALSAR': 'ALOS1-PALSAR', 'NISAR': 'NSARL'}
@@ -1175,9 +1354,13 @@ def makeSpatial(outDir, spatialFile, template):
 
 
 def runSubMosaic(outPath, inputFileName, outFileName, baseFlags, firstDate,
-                 lastDate, lsFile, dem, stdout, stderr):
+                 lastDate, lsFile, dem, stdout, stderr, failures):
     '''
-    run sub mosaics (called as a thread).
+    run sub mosaics (called as a thread). Records (outFileName, inputFileName,
+    reason) in the shared -- failures -- list whenever mosaic3d does not exit
+    cleanly, so the caller can abort before assembling a mosaic from pieces
+    that mosaic3d left stale (a nonzero exit means the sector's
+    pieces/mosaic-*.* were not regenerated).
     '''
     #
     # open outputs and check
@@ -1199,10 +1382,17 @@ def runSubMosaic(outPath, inputFileName, outFileName, baseFlags, firstDate,
             f'pieces/{inputFileName} {dem} pieces/{outFileName}'
         print(command, file=stdout)
         # , executable='/bin/csh'
-        call(command, shell=True, stdout=stdout, stderr=stderr)
-    except Exception:
+        returnCode = call(command, shell=True, stdout=stdout, stderr=stderr)
+        # flush so the sector log is complete on disk before it is inspected
+        stdout.flush()
+        stderr.flush()
+        if returnCode != 0:
+            failures.append((outFileName, inputFileName,
+                             f'mosaic3d exited with code {returnCode}'))
+    except Exception as e:
         # if missing files, reject to the NoResult directory
         u.mywarning(f'warning: could not run {outPath}/runOff')
+        failures.append((outFileName, inputFileName, f'exception: {e}'))
     return
 
 
@@ -1211,6 +1401,9 @@ def processSectors(template, flags, outDir, dataTakes, lsCulledFile):
     Breakup into sections
     '''
     threads, outPieces, geoPieces, stderrs, stdouts = [], [], [], [], []
+    # Shared across sector threads: each thread appends a record here if its
+    # mosaic3d run fails, so main() can refuse to assemble stale pieces.
+    failures = []
     xdims, ydims, srsInfo, mTemp = mosf.sectionTemplate(template['template'])
     if regionDefs.epsg() is not None:
         wkt = regionDefs.epsg()
@@ -1245,7 +1438,8 @@ def processSectors(template, flags, outDir, dataTakes, lsCulledFile):
                                                   lsCulledFile,
                                                   regionDefs.dem(),
                                                   stdout,
-                                                  stderr]
+                                                  stderr,
+                                                  failures]
                                             )
                            )
             gd = u.geodat(x0=xdim['xll'] * 0.001, y0=ydim['yll'] * 0.001,
@@ -1257,7 +1451,7 @@ def processSectors(template, flags, outDir, dataTakes, lsCulledFile):
     stdout = open(f'{outDir}/io/All.stdout', 'w')
     stderr = open(f'{outDir}/io/All.stderr', 'w')
 
-    return threads,  outPieces, geoPieces, stdouts, stderrs
+    return threads,  outPieces, geoPieces, stdouts, stderrs, failures
 
 # ----------------------------------------------------------------------------
 #  main
@@ -1272,11 +1466,11 @@ def main():
     global regionID
     #
     # get command line args
-    maxThreads = 24
     interpSize = 50
     #
     print('\nTemplate')
     template, flags, regionDefs = processQArgs()
+    maxThreads = flags.get('nThreads', 24)
     for key in template:
         print(f'{key}: {template[key]}')
     print('\nFlags')
@@ -1304,15 +1498,29 @@ def main():
     if not flags['noReprocess']:
         dataTakes = processInputFileQ(template['inputFile'], flags['noTSX'])
         #
-    threads, piecesFiles, piecesGeodats, stdouts, stderrs = \
+    threads, piecesFiles, piecesGeodats, stdouts, stderrs, sectorFailures = \
         processSectors(template, flags, outDir, dataTakes, lsCulledFile)
     #
-    # Run threads if noReprocess=False
-    if not flags['noReprocess']:
+    # Run threads if noReprocess=False and not metaOnly
+    if not flags['noReprocess'] and not flags['metaOnly']:
         u.runMyThreads(threads, maxThreads, 'sector vel')
+        # If any sector's mosaic3d aborted, its pieces/mosaic-*.* were not
+        # regenerated and still hold results from a previous run. Refuse to
+        # assemble a mosaic from a mix of fresh and stale pieces -- fail loudly,
+        # naming the sectors and their log files, and exit nonzero so callers
+        # (e.g. makemosaic.py) can stop rather than ship a stale product.
+        if sectorFailures:
+            msg = [f'{len(sectorFailures)} sector(s) failed; refusing to '
+                   f'assemble a mosaic from stale pieces in {outDir}:']
+            for outFileName, inputSubFile, reason in sectorFailures:
+                sector = outFileName.replace('mosaic-', '')
+                msg.append(f'  sector {sector}: {reason} '
+                           f'(see {outDir}/io/pieces.stderr.{sector})')
+            print(f'\n\t\033[1;31m *** {chr(10).join(msg)} *** \033[0m\n')
+            raise SystemExit(1)
     #
     # Combine submosaics
-    if True:  # Debug: set false to bypass
+    if not flags['metaOnly']:  # skip entirely when only rebuilding metadata
         #
         # Mask data
         maskMosaics(piecesFiles, piecesGeodats, outDir, outputMaskShape,

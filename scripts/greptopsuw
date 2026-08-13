@@ -1,0 +1,94 @@
+#!/bin/csh
+set files=`ls -d   1*_* 2*_* 3*_* 4*_* 5*_* 6*_* 7*_* 8*_* 9*_*`
+set tmp=`ls -d *_*/geodat30x6.in`
+set ascdsc=`grep ding $tmp[1]`
+echo ' '
+echo '**** ' $ascdsc[2]
+echo ' '
+#
+if( $#argv == 2) then
+    set frames=$2
+else
+    set tmpfile=tmp.$$
+    ls -d   1*_* 2*_* 3*_* 4*_* 5*_* 6*_* 7*_* 8*_* 9*_*  | awk '{split($1,m,"_"); split(m[2],n,"/"); print(n[1])}' > $tmpfile
+    set frames=`sort -u $tmpfile`
+    rm $tmpfile
+endif
+#echo $frames
+
+if( $#argv >2 || $#argv < 1) then 
+    echo "greptops year [frame]"
+    exit
+endif
+#echo $frame
+#
+# Grep all month data into tmpfile
+#
+set tmpfile=tmp.$$
+foreach frame ($frames)
+	greptopsmonthuw $1 jan $tmpfile $frame
+	greptopsmonthuw $1 feb  $tmpfile $frame
+	greptopsmonthuw $1 mar  $tmpfile $frame
+	greptopsmonthuw $1 apr $tmpfile $frame
+	greptopsmonthuw $1 may $tmpfile $frame
+	greptopsmonthuw $1 jun $tmpfile $frame
+	greptopsmonthuw $1 jul $tmpfile $frame
+	greptopsmonthuw $1 aug $tmpfile $frame
+	greptopsmonthuw $1 sep $tmpfile $frame
+	greptopsmonthuw $1 oct $tmpfile $frame
+	greptopsmonthuw $1 nov $tmpfile $frame
+	greptopsmonthuw $1 dec $tmpfile $frame
+# look ahead one month for temporal baselines
+       @ year = $1 + 1
+       greptopsmonthuw $year jan $tmpfile $frame
+end
+#
+# process lines of file for pair lenght and formatting
+# 
+if(! -e $tmpfile) then
+     exit
+endif
+set lines="`cat $tmpfile`"
+set i=1
+set ip=1
+set nlines=$#lines
+#echo $#nlines
+#
+# Loop over lines
+#
+set dd=0
+touch tmpfileout.$$
+while ($i <= $nlines)
+  @ ip = $i + 1
+  set t=`echo $lines[$i]`
+# get day of year
+  set doy=`echo $t[7] | awk '{printf("%d",$1)}'`
+  set dd=0
+# if not last line, look ahead for temporal baseline
+  if($ip <= $nlines) then
+       set tnext=`echo $lines[$ip]`
+       set doynext=`echo $tnext[7] | awk '{printf("%d",$1)}'`
+# if over year boundary, update by number of days in year with leap
+       if($tnext[5] > $1) then
+       		    set leap=0
+		    @ m = $1 % 4
+       		    if($m == 0) set leap=1
+       		    @ doynext = $doynext + 365 + $leap
+       endif
+# compute temporal baseline
+	@ dd = $doynext - $doy
+	if($dd < 0) set dd=0
+  endif
+# output result for the given year - skip look ahead results
+  if($t[5] == $1)  echo $t $dd | awk '{printf("%2s%4dd %9s %3d-%3s-%4d %2s %4d\n",$1,$8,$2,$3,$4,$5,$6,$7)}' >> tmpfileout.$$
+  set doyold=$doy
+
+  @ i = $i + 1
+end
+sort -k6 -n tmpfileout.$$
+rm $tmpfile
+rm tmpfileout.$$
+
+
+
+

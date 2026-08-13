@@ -213,12 +213,16 @@ def buildSecondaryGeodat(superGeojson, simsDir, deltaT=12):
 
 # ---- dummy param files ------------------------------------------------------
 
-def createDummyParams(simsDir, superGeojson):
+def createDummyParams(simsDir, superGeojson, use_yaml=False):
     """
     Write zero-polynomial az.est, rBaseline, and baseline.26x16 param files.
 
     Because the secondary geodat has zero baseline (same orbit, shifted time)
     all polynomial corrections are exactly zero.
+
+    When use_yaml=True, writes yaml variants (az.est.yaml, az.est.const.yaml,
+    az.est.svlinear.yaml, rBaseline.yaml) instead of legacy text files.
+    mosaic3d auto-detects yaml fallback (Case 3) so createInputFile is unchanged.
     """
     p = superGeojson['properties']
     H   = p['SpaceCraftAltitude'] / 1000.0    # m → km
@@ -230,20 +234,48 @@ def createDummyParams(simsDir, superGeojson):
     slpR   = p['SLCRangePixelSize']
     wl     = p['Wavelength']
 
-    header = (
-        f';;\n'
-        f';; H, InSAR parameters  Re, RNear, Rc, nlr,nla\n'
-        f';;\n'
-        f'    {H:.3f}   {Re:.3f}   {RNear:.3f}  {Rc:.3f}'
-        f'  {nlr} {nla} {slpR:.6f} {wl:.6f}\n'
-        f';; Tide difference : none\n'
-    )
-
-    for fname in ('az.est', 'rBaseline'):
-        with open(os.path.join(simsDir, fname), 'w') as fp:
+    if use_yaml:
+        az_yaml = (
+            'sigma: 0.0\n'
+            'cnst: 0.0\n'
+            'dbcds: 0.0\n'
+            'dbhds: 0.0\n'
+            'doffdx: 0.0\n'
+        )
+        for fname in ('az.est.yaml', 'az.est.const.yaml', 'az.est.svlinear.yaml'):
+            with open(os.path.join(simsDir, fname), 'w') as fp:
+                fp.write(az_yaml)
+        r_yaml = 'sigma: 0.0\ncnst: 0.0\n'
+        with open(os.path.join(simsDir, 'rBaseline.yaml'), 'w') as fp:
+            fp.write(r_yaml)
+    else:
+        header = (
+            f';;\n'
+            f';; H, InSAR parameters  Re, RNear, Rc, nlr,nla\n'
+            f';;\n'
+            f'    {H:.3f}   {Re:.3f}   {RNear:.3f}  {Rc:.3f}'
+            f'  {nlr} {nla} {slpR:.6f} {wl:.6f}\n'
+            f';; Tide difference : none\n'
+        )
+        # az.est (getAzParams(), readOffsets.c): header line, then straight to the
+        # covariance-matrix/corrections line -- no baseline-count line expected.
+        with open(os.path.join(simsDir, 'az.est'), 'w') as fp:
             fp.write(header)
             fp.write(';\n;&\n;\n')
             fp.write('0.0 0.0 0.0 0.0\n')
+
+        # rBaseline (getRParams(), readOffsets.c): unlike az.est, this reader first
+        # reads a bare "number of lines of baseline data" count, then (for nBaselines
+        # > 1/2) skips that many placeholder lines, then reads the covariance matrix,
+        # and finally sscanfs the corrections line for 7 fields (bn,bp,dBn,dBp,rConst,
+        # dBnQ,dBpQ) -- falling back to 5 if only bn,bp,dBn,dBp,rConst are given.
+        # rConst must be < LARGEINT (readOffsets.c ~469) or getRParams errors, so all
+        # 7 fields are written explicitly. nBaselines=1 means no placeholder lines are
+        # needed before the covariance/corrections section.
+        with open(os.path.join(simsDir, 'rBaseline'), 'w') as fp:
+            fp.write(header)
+            fp.write(';\n; Number of lines of baseline data\n;\n1\n;\n')
+            fp.write('0.0 0.0 0.0 0.0 0.0 0.0 0.0\n')
 
     # baseline.26x16: two lines of zero baseline data
     baselineHdr = (
@@ -272,16 +304,29 @@ def createDummyParams(simsDir, superGeojson):
 
 # ---- simoffsets + mosaic3d --------------------------------------------------
 
-def runSimoffsets(simsDir, region, dem, ompThreads=4):
+def runSimoffsets(simsDir, region, dem, ompThreads=4, velMap=None, regionFile=None):
     """Run simoffsets inside simsDir to produce synthetic offset files."""
+    velMapArg = f'-velMap {velMap} ' if velMap else ''
+    # -regionFile takes precedence over -region (matches simoffsets.py's own
+    # resolveRegion() precedence); omit -region entirely when region is None
+    # (e.g. regionFile-only callers) since simoffsets.py auto-detects
+    # greenland/antarctica from the geodat when -region is never given, but a
+    # literal "-region None" would break that auto-detect.
+    if regionFile:
+        regionArg = f'-regionFile {regionFile} '
+    elif region:
+        regionArg = f'-region {region} '
+    else:
+        regionArg = ''
     cmd = (
         f'cd {simsDir}; '
-        f'simoffsets -region {region} -syncDat '
+        f'simoffsets {regionArg}'
         f'-geodatFile super.geojson '
         f'-secondGeodatFile super.secondary.geojson '
         f'-offsetsDat offsets.dat '
         f'-azOffsets offsets.da '
         f'-dem {dem} '
+        f'{velMapArg}'
         f'--ompThreads {ompThreads}'
     )
     print(cmd)
@@ -321,7 +366,8 @@ def runMosaic3d(simsDir, dem):
 # ---- top-level entry point --------------------------------------------------
 
 def initRAReference(frameRangeDir, trackDir, region, dem,
-                    deltaT=12, ompThreads=4):
+                    deltaT=12, ompThreads=4, use_yaml=False, velMap=None,
+                    regionFile=None):
     """
     Build the vr/va reference basemap for one frame-range directory.
 
@@ -333,6 +379,9 @@ def initRAReference(frameRangeDir, trackDir, region, dem,
     dem           : str  path to DEM file
     deltaT        : int  repeat-pass interval in days (default 12)
     ompThreads    : int  OpenMP threads for simoffsets/siminsar
+    use_yaml      : bool write yaml param files instead of legacy text (default False)
+    velMap        : str  velocity map passed to simoffsets -velMap [region default]
+    regionFile    : str  project-specific region yaml, takes precedence over region
     """
     # resolve frame range
     dirName = os.path.basename(os.path.abspath(frameRangeDir))
@@ -363,8 +412,9 @@ def initRAReference(frameRangeDir, trackDir, region, dem,
 
     superGeo   = buildSuperGeodat(geodatFiles, simsDir)
     buildSecondaryGeodat(superGeo, simsDir, deltaT=deltaT)
-    runSimoffsets(simsDir, region, dem, ompThreads=ompThreads)
-    createDummyParams(simsDir, superGeo)
+    runSimoffsets(simsDir, region, dem, ompThreads=ompThreads, velMap=velMap,
+                 regionFile=regionFile)
+    createDummyParams(simsDir, superGeo, use_yaml=use_yaml)
     createInputFile(simsDir, deltaT=deltaT)
     runMosaic3d(simsDir, dem)
 
@@ -393,6 +443,8 @@ def main():
                         help='Repeat-pass interval in days [12]')
     parser.add_argument('--ompThreads', type=int, default=4,
                         help='OpenMP threads for simoffsets [4]')
+    parser.add_argument('--yaml', action='store_true',
+                        help='Write az.est and rBaseline param files in YAML format')
     parser.add_argument('--initializeReference', action='store_true',
                         help='Rebuild even if basemap already exists')
     args = parser.parse_args()
@@ -432,7 +484,8 @@ def main():
             dem = myRegion.dem()
 
     initRAReference(args.frameRangeDir, args.trackDir, region, dem,
-                    deltaT=args.deltaT, ompThreads=args.ompThreads)
+                    deltaT=args.deltaT, ompThreads=args.ompThreads,
+                    use_yaml=args.yaml)
 
 
 if __name__ == '__main__':

@@ -69,6 +69,14 @@ def setupImageMosaicArgs():
     parser.add_argument('--averageAll', action='store_true', default=False,
                         help='Average all scenes in date range; omit orbit '
                         'priority flag from geomosaic')
+    parser.add_argument('--min', action='store_true', default=False,
+                        help='Mosaic = pixel-wise minimum across all inputs')
+    parser.add_argument('--max', action='store_true', default=False,
+                        help='Mosaic = pixel-wise maximum across all inputs')
+    parser.add_argument('--cycleTag', type=str, default=None,
+                        help='NISAR cycle label appended to prefix, e.g. '
+                        'cycle016 (zero-padded; set by makeimagemosaics in '
+                        'nisarCycle mode)')
     args = parser.parse_args()
     #
     if args.descendingOnly and args.ascendingOnly:
@@ -94,6 +102,8 @@ def setupImageMosaicArgs():
     prodPrefix = args.prefix
     if prefix is not None:
         prodPrefix = prefix
+    if args.cycleTag is not None:
+        prodPrefix = f'{prodPrefix}_{args.cycleTag}'
     #
     # Some args are hardwired for now but can be updated later
     if tracks is None:
@@ -106,9 +116,18 @@ def setupImageMosaicArgs():
             ascendingOnly = True
         elif passType == 'descending':
             descendingOnly = True
+    # geoMosaicMode: CLI flag wins over template key
+    templateDict = mosf.readTemplate(args.template)
+    geoMosaicMode = templateDict.get('geoMosaicMode', None)
+    if args.min:
+        geoMosaicMode = 'min'
+    elif args.max:
+        geoMosaicMode = 'max'
     # Make sure no reprocessing, including mosaic3d
     if args.noReprocess:
         args.noMosaic = True
+    # min/max mode always averages over the full date range (no orbit priority)
+    averageAll = args.averageAll or geoMosaicMode in ('min', 'max')
     myArgs = {'prefix': prodPrefix,
               'firstDate': firstDate, 'lastDate': lastDate,
               'noReprocess': args.noReprocess, 'check': args.check,
@@ -121,12 +140,13 @@ def setupImageMosaicArgs():
               'removePad': removePad,
               'dem': dem, 'smoothL': smoothL, 'cleanUp': not args.noClean,
               'runMosaics': not args.setupOnly,
-              'averageAll': args.averageAll}
+              'averageAll': averageAll,
+              'geoMosaicMode': geoMosaicMode}
     return myArgs
 
 
 def runGeoMosaic(inputFile, date1, date2, dem, smoothL, calFlag, srsInfo,
-                 removePad, averageAll=False):
+                 removePad, averageAll=False, geoMosaicMode=None):
     '''
     Run geomosaic command
     Parameters
@@ -157,9 +177,11 @@ def runGeoMosaic(inputFile, date1, date2, dem, smoothL, calFlag, srsInfo,
     stderrFile = f'{outDir}/log/{outFile.replace("mosaic","stderr")}'
     # orbit priority flag: omitted when averaging all scenes
     orbitFlag = '' if averageAll else '-descending'
+    # min/max mode flag
+    minMaxFlag = f'-{geoMosaicMode}' if geoMosaicMode in ('min', 'max') else ''
     # assemble command
     command = f'cd {outDir}; ' \
-        f'geomosaic -GTiff -center {orbitFlag} {flags} -xyDEM '\
+        f'geomosaic -GTiff -center {orbitFlag} {minMaxFlag} {flags} -xyDEM '\
         f'-date1 {date1.strftime("%m-%d-%Y")} ' \
         f'-date2 {date2.strftime("%m-%d-%Y")} '  \
         f'{os.path.basename(inputFile)} {dem} {outFile}{suffix}'
@@ -201,7 +223,8 @@ def setupGeoMosaic(inputFiles, myArgs, srsInfo):
                                               myArgs['calFlag'],
                                               srsInfo,
                                               myArgs['removePad'],
-                                              myArgs.get('averageAll', False)]))
+                                              myArgs.get('averageAll', False)],
+                                        kwargs={'geoMosaicMode': myArgs.get('geoMosaicMode')}))
     return threads
 
 
@@ -269,14 +292,15 @@ def makeImageSpatial(corners, outDir, spatialFile):
 
 def imageSatTypes(shapeFileName):
     '''
-    Read the sat types (for now S1A, S1B) from the summary shape file.
+    Read the sat types (S1A, S1B, S1C, S1D, NISAR) from the summary shape file.
     Assumes being called from pieces directory.
     Parameters
     ----------
     shapeFilesName : shapefile name (xxx.shp).
     Returns
     -------
-    sTypes : {'S1A': True/False, 'S1B': True/False} .
+    sTypes : {'S1A': True/False, 'S1B': True/False, 'S1C': True/False,
+              'S1D': True/False, 'NISAR': True/False}.
 
     '''
     u.pushd('../release')
@@ -320,13 +344,13 @@ def populateImagePremet(preMetData, firstDate, lastDate, validPlatforms={},
     preMetData.append(s.premet({'End_time': '23:59:59.0000'}))
     #
     sensorShort = {'S1A': 'C-SAR', 'S1B': 'C-SAR',
-                   'S1C': 'C-SAR', 'S1-D': 'C-SAR',
+                   'S1C': 'C-SAR', 'S1D': 'C-SAR',
                    'NISAR': 'L-SAR'}
     instShort = {'S1A': 'C-SAR', 'S1B': 'C-SAR',
-                 'S1C': 'C-SAR', 'S1-D': 'C-SAR',
+                 'S1C': 'C-SAR', 'S1D': 'C-SAR',
                  'NISAR': 'NISAR'}
     instrument = {'S1A': 'Sentinel-1A', 'S1B': 'Sentinel-1B',
-                  'S1C': 'Sentinel-1C', 'S1D': 'Sentinel-1C',
+                  'S1C': 'Sentinel-1C', 'S1D': 'Sentinel-1D',
                   'NISAR': 'NISAR'}
     #
     sensor = ''
@@ -377,16 +401,12 @@ def makeProdName(prefix, date1, date2):
 
 def makeShapePremet(myShapeName, sTypes, firstDate, lastDate):
     ''' write premet data for shapefile '''
-    print('here1')
     preMetFile = myShapeName.replace('.shp', '.premet')
     preMets = []
-    # print(sTypes)
-    print('here2')
     preMets = populateImagePremet(preMets, firstDate, lastDate,
                                   validPlatforms=sTypes,
                                   prodType='shape file meta data for')
     prodName = myShapeName.split('/')[-1]
-    print('here3')
     # now write the file
     fp = open(preMetFile, 'w')
     # forcee file name to the beginning
@@ -425,20 +445,17 @@ def mergeImageTiles(prodDir, prefix, date1, date2, posting, corners,
     try:  # Use try so cleanUp won't occur if there is a problem
         u.pushd(directory=f'{prodDir}/pieces')
         #
-        # shape file and premet are S1-specific; skip for corr mode
         prodName = makeProdName(prefix, date1, date2)
         satTypes = {k: False for k in ['S1A', 'S1B', 'S1C', 'S1D', 'NISAR']}
-        if calFlag != 'corr':
-            shapeFileName = prodName.replace('*', 'shape').replace('_RESm', '')
-            command = f'makeimageshapefile.py inputFile.0.0 ' \
-                f'../release/{shapeFileName}'
-            print(command)
-            call(command, shell=True)  # , executable='/bin/csh')
-            satTypes = imageSatTypes(f'{shapeFileName}.shp')
-            makeImageSpatial(corners, '..', f'{shapeFileName}.spo')
-            # added Aug 20 2020
-            makeShapePremet(f'../release/{shapeFileName}.shp', satTypes,
-                            date1, date2)
+        shapeFileName = prodName.replace('*', 'shape').replace('_RESm', '')
+        command = f'makeimageshapefile.py inputFile.0.0 ' \
+            f'../release/{shapeFileName}'
+        print(command)
+        call(command, shell=True)  # , executable='/bin/csh')
+        satTypes = imageSatTypes(f'{shapeFileName}.shp')
+        makeImageSpatial(corners, '..', f'{shapeFileName}.spo')
+        makeShapePremet(f'../release/{shapeFileName}.shp', satTypes,
+                        date1, date2)
         # build the vrt
         if not noReprocess:
             for suffix in suffixes:  # Loop on prod types
@@ -446,33 +463,22 @@ def mergeImageTiles(prodDir, prefix, date1, date2, posting, corners,
                 if os.path.exists(f'{prodDir}.{suffix}.vrt'):
                     os.remove(f'{prodDir}.{suffix}.vrt')
                 # generate vrt from tiffs
-                print(2)
                 command = f'gdalbuildvrt -vrtnodata {noData} '\
                     f'{prodDir}.{suffix}.vrt *{suffix}.tif'
-                print(command)
                 call(command, shell=True)  # , executable='/bin/csh')
                 # create the cloud optimized geo
                 tifName = \
                     prodName.replace("*", suffix).replace("RES", str(posting))
                 jpgName = prodName.replace("*", suffix).replace("RES", jpgRes)
-                # create image and stats
-                # command = f'rio cogeo create {prodDir}.{suffix}.vrt ' \
-                #    f'../release/{tifName}.tif --overview-resampling ' \
-                #    f'average ; gdalinfo -stats ../release/{tifName}.tif'
-                print(3)
                 newTif = f'../release/{tifName}.tif'
                 origVrt = f'{prodDir}.{suffix}.vrt'
                 command = 'gdal_translate -of COG -co COMPRESS=DEFLATE ' \
                     '-co RESAMPLING=AVERAGE -co OVERVIEWS=IGNORE_EXISTING ' \
                     '-co GEOTIFF_VERSION=1.1 -co BIGTIFF=NO -stats ' \
                     f'{origVrt} {newTif}'
-                # print(command)
-                # u.myerror('debug')
-                print(4)
                 call(command, shell=True)  # , executable='/bin/csh')
                 #
                 # make quicklook
-                print(5)
                 call('gdal_translate -co "QUALITY=99" -scale -of JPEG -r '
                      f'average -tr {jpgRes} {jpgRes} '
                      f'../release/{tifName}.tif ../release/{jpgName}.jpg',
@@ -542,11 +548,6 @@ def checkDateRange(myArgs, sarDB):
         True if in range, False if not
 
     '''
-    print(type(myArgs['firstDate']),  type(sarDB.minDate))
-    print(myArgs['firstDate'],  sarDB.minDate)
-    print(myArgs['lastDate'], sarDB.maxDate)
-    print(myArgs['firstDate'] >= sarDB.minDate)
-    print(myArgs['lastDate'] <= sarDB.maxDate)
     return myArgs['firstDate'] >= sarDB.minDate and \
         myArgs['lastDate'] <= (sarDB.maxDate+timedelta(days=6))
 
@@ -563,8 +564,6 @@ def main():
     ''' Create an image mosaic '''
     # get args
     myArgs = setupImageMosaicArgs()
-    print(myArgs)
-    #
     checkGdalVersion()
     #
     myDB = mosf.sarDB()
@@ -572,8 +571,8 @@ def main():
     # myDB.printByDate()
     #
     if not checkDateRange(myArgs, myDB):
-        u.myerror('Requested range falls out side of DB date range:'
-                  f'{myDB.minDate} {myDB.maxDate}\nUpdate DB or adjust dates')
+        u.mywarning('Requested range falls outside of DB date range:'
+                    f'{myDB.minDate} {myDB.maxDate}\nContinuing with available data')
     # create single dict by date of products across multiple dbs with paths
     dateRangeAll = \
         myDB.extractByDateRange(myArgs['firstDate'],
@@ -586,18 +585,21 @@ def main():
     prodDir = setupMosaicDir(myArgs['firstDate'], myArgs['lastDate'],
                              f'{myArgs["prefix"]}_{myArgs["calFlag"]}')
     #
+    writeFiles = not myArgs['noReprocess']
     if myArgs['calFlag'] == 'corr':
         inputFiles, srsInfo, corners, posting = \
             mosf.makeSectionedCorrInputFiles(f'{prodDir}/pieces',
                                              myArgs['templateFile'],
                                              dateRangeTracks,
-                                             myArgs['geodatFile'])
+                                             myArgs['geodatFile'],
+                                             writeFiles=writeFiles)
     else:
         inputFiles, srsInfo, corners, posting = \
             mosf.makeSectionedPowerInputFiles(f'{prodDir}/pieces',
                                               myArgs['templateFile'],
                                               dateRangeTracks,
-                                              myArgs['geodatFile'])
+                                              myArgs['geodatFile'],
+                                              writeFiles=writeFiles)
     # u.myerror('fsdf')
     # Determine max threads
     maxThreads = min(len(inputFiles), int(multiprocessing.cpu_count()/2))

@@ -8,6 +8,109 @@ from utilities import geodatrxa
 import sarfunc as s
 import argparse
 import glob
+from osgeo import gdal
+
+
+def _writeArrayAsTiff(filename, data, noDataValue=-2.e9):
+    """Write float32 numpy array to GeoTIFF with pixel-coord geotransform."""
+    driver = gdal.GetDriverByName('GTiff')
+    ds = driver.Create(filename, data.shape[1], data.shape[0], 1, gdal.GDT_Float32,
+                       options=['COMPRESS=DEFLATE'])
+    ds.SetGeoTransform([-0.5, 1., 0., -0.5, 0., 1.])
+    band = ds.GetRasterBand(1)
+    band.WriteArray(data.astype(np.float32))
+    band.SetNoDataValue(noDataValue)
+    ds = None
+
+
+def _writeByteArrayAsTiff(filename, data):
+    """Write byte (uint8) numpy array to GeoTIFF with pixel-coord geotransform."""
+    driver = gdal.GetDriverByName('GTiff')
+    ds = driver.Create(filename, data.shape[1], data.shape[0], 1, gdal.GDT_Byte,
+                       options=['COMPRESS=DEFLATE'])
+    ds.SetGeoTransform([-0.5, 1., 0., -0.5, 0., 1.])
+    band = ds.GetRasterBand(1)
+    band.WriteArray(data.astype(np.uint8))
+    ds = None
+
+
+def _maskedBoxMean(arr, valid, size):
+    """
+    Masked box mean with window (size, size), via scipy.ndimage.uniform_filter (an O(1)-
+    per-pixel running-sum mean, the Python-side equivalent of computeSmoothRadius.c's
+    boxAverage). Filtering value*mask and mask separately and dividing cancels the window-area
+    normalization uniform_filter applies, leaving a true masked average.
+    """
+    from scipy.ndimage import uniform_filter
+    validF = valid.astype(np.float64)
+    num = uniform_filter(np.where(valid, arr, 0.0), size=size, mode='constant', cval=0.0)
+    den = uniform_filter(validF, size=size, mode='constant', cval=0.0)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        return np.where(den > 0, num / den, arr)
+
+
+def computeSmoothRadiusMap(dr, da, toleranceDr, toleranceDa, maxRadius, nIter):
+    """
+    Per-pixel single-look azimuth-pixel half-width: the largest contiguous radius r
+    (1..maxRadius) for which repeatedly (nIter times, box->triangular->Gaussian-ish) box-
+    filtering dr/da with half-width (r, r) changes the pixel by no more than
+    toleranceDr/toleranceDa. First-violation cutoff: once a pixel fails at some r, its answer
+    is locked at r-1 and never revisited (same convention as computeSmoothRadiusMap in
+    mosaicSource/simInSAR/computeSmoothRadius.c). A pixel is locked the moment *either* dr or
+    da exceeds its tolerance, giving one combined (more conservative) radius map.
+    """
+    valid = (dr > -1.e6) & (da > -1.e6) & np.isfinite(dr) & np.isfinite(da)
+    radius = np.zeros(dr.shape, dtype=np.uint8)
+    locked = ~valid
+    for r in range(1, maxRadius + 1):
+        size = 2 * r + 1
+        sDr, sDa = dr, da
+        for _ in range(nIter):
+            sDr = _maskedBoxMean(sDr, valid, size)
+            sDa = _maskedBoxMean(sDa, valid, size)
+        ok = (~locked) & (np.abs(sDr - dr) <= toleranceDr) & (np.abs(sDa - da) <= toleranceDa)
+        radius[ok] = r
+        locked = locked | ~ok
+        if locked.all():
+            break
+    return radius
+
+
+def _writeTiffOffsetVrt(vrtFile, drTif, daTif, meta, additionalMetaData=None):
+    """Write a two-band VRT referencing .dr.tif and .da.tif offset files.
+
+    Built by hand (not gdal.BuildVRT, which rejects the "positive NS
+    resolution" geotransform used by _writeArrayAsTiff and the other
+    GrIMP tiff outputs).
+    """
+    if additionalMetaData:
+        meta = {**meta, **{str(k): str(v) for k, v in additionalMetaData.items()}}
+    srcDs = gdal.Open(drTif)
+    xSize, ySize = srcDs.RasterXSize, srcDs.RasterYSize
+    geoTransform = srcDs.GetGeoTransform()
+    dataType = srcDs.GetRasterBand(1).DataType
+    srcDs = None
+
+    driver = gdal.GetDriverByName('VRT')
+    vrt = driver.Create(vrtFile, xSize, ySize, 0)
+    vrt.SetGeoTransform(geoTransform)
+    vrt.SetMetadata({str(k): str(v) for k, v in meta.items()})
+
+    vrtDir = os.path.dirname(os.path.abspath(vrtFile))
+    for tif, description in ((drTif, 'RangeOffsets'), (daTif, 'AzimuthOffsets')):
+        vrt.AddBand(dataType)
+        band = vrt.GetRasterBand(vrt.RasterCount)
+        band.SetMetadataItem('Description', description)
+        sourceXml = (
+            '<SimpleSource>'
+            f'<SourceFilename relativeToVRT="1">{os.path.relpath(tif, vrtDir)}</SourceFilename>'
+            '<SourceBand>1</SourceBand>'
+            f'<SrcRect xOff="0" yOff="0" xSize="{xSize}" ySize="{ySize}"/>'
+            f'<DstRect xOff="0" yOff="0" xSize="{xSize}" ySize="{ySize}"/>'
+            '</SimpleSource>'
+        )
+        band.SetMetadataItem('source_0', sourceXml, 'new_vrt_sources')
+    vrt = None
 
 
 def simoffsetsUsage():
@@ -43,7 +146,7 @@ def resolveDefault(args, key, default):
         return getattr(args, key)
     return default
 
-def simOffsetsProcessArgs1(fp):
+def simOffsetsProcessArgs1():
     """
     Process arguments and defaults
     """
@@ -81,6 +184,14 @@ def simOffsetsProcessArgs1(fp):
     parser.add_argument('-fastMask', '--fastMask',  action='store_true',
                         default=False,
                         help='Use the fast mask for mask generation')
+    parser.add_argument('--iceMask', '-iceMask', action='store_true',
+                        default=False,
+                        help='Use binary ice-extent mask (icemask field in region YAML, '
+                        'values: 0=not ice, 1=ice) instead of tracking mask')
+    parser.add_argument('--iceRockWaterMask', '-iceRockWaterMask', action='store_true',
+                        default=False,
+                        help='Use ice-rock-water mask (icerockwatermask field in region '
+                        'YAML, values: water=0, rock=1, ice=2) instead of tracking mask')
     parser.add_argument('-LSB', '--LSB', action='store_true',
                         default=False,
                         help='Write output in LSB byte order [MSB]')
@@ -89,6 +200,11 @@ def simOffsetsProcessArgs1(fp):
                         '[from Region file or default regionDefs]')
     parser.add_argument('-dem', '--dem', type=str, default=None,
                         help='DEM [from Region file or default regionDefs]')
+    parser.add_argument('-verticalCorrection', '--verticalCorrection', type=str,
+                        default=None,
+                        help='Vertical correction (submergence/emergence) grid, '
+                        'm/yr ice-equivalent, scalar GeoTIFF, same grid as passed '
+                        'to siminsar -verticalCorrection [None - no correction]')
 
     parser.add_argument('-region', '--region', type=str, default=None,
                         help='Predefined region if on GrIMP server'
@@ -114,12 +230,50 @@ def simOffsetsProcessArgs1(fp):
                         '[None]')
     parser.add_argument('--ompThreads', type=int, default=4,
                         help='Number of OpenMP threads for siminsar [4]')
+    parser.add_argument('--tiff', action='store_true', default=False,
+                        help='Write lat/lon and offset outputs as GeoTIFF '
+                        'instead of GrIMP binary flat files. '
+                        'lat/lon → .lat.tif/.lon.tif + .ll.vrt; '
+                        'offsets → .dr.tif/.da.tif + .vrt [False]')
+    parser.add_argument('--minTol', type=float, default=None,
+                        help='Variable smoothing-radius map: m/yr floor for the adaptive '
+                        'tolerance clip(percentSpeed/100*speed, minTol, maxTol). Required '
+                        'together with --percentSpeed/--maxTol to enable the map [None]')
+    parser.add_argument('--percentSpeed', type=float, default=None,
+                        help='Variable smoothing-radius map: percent of local speed (e.g. '
+                        '1 = 1%%) used in the adaptive tolerance. Required together with '
+                        '--minTol/--maxTol [None]')
+    parser.add_argument('--maxTol', type=float, default=None,
+                        help='Variable smoothing-radius map: m/yr ceiling for the adaptive '
+                        'tolerance. Required together with --minTol/--percentSpeed [None]')
+    parser.add_argument('--maxSmoothRadius', type=int, default=50,
+                        help='Variable smoothing-radius map: sweep cap in single-look '
+                        'pixels, clamped to <= 255 (byte output) [50]')
+    parser.add_argument('--smoothNIter', type=int, default=3,
+                        help='Variable smoothing-radius map: repeated box-filter passes '
+                        'per sweep step (Gaussian-ish) [3]')
 
     #
     # Parse Args.
     args = parser.parse_args()
+    smoothFlags = [args.minTol is not None, args.percentSpeed is not None,
+                  args.maxTol is not None]
+    if any(smoothFlags) and not all(smoothFlags):
+        u.myerror('simoffsets: --minTol/--percentSpeed/--maxTol must be given together')
+    if args.maxSmoothRadius > 255:
+        print(f'WARNING: --maxSmoothRadius {args.maxSmoothRadius} exceeds byte range, '
+              'clamping to 255')
+        args.maxSmoothRadius = 255
     #
     byteOrder = {True: 'LSB', False: 'MSB'}[args.LSB]
+    #
+    # Fail marker lives alongside the offsets product it describes, so
+    # failures can be located per-product rather than in whatever directory
+    # the caller happened to be in.
+    offsetsRoot = args.offsetsDat.replace('.dat', '').replace('.vrt', '')
+    failFile = os.path.join(os.path.dirname(os.path.abspath(offsetsRoot)),
+                            f'fail.simoffsets.{os.path.basename(offsetsRoot)}')
+    fp = open(failFile, 'w')
     #
     secondGeodatFile = resolveDefault(args, 'secondGeodatFile',
                                       f'{args.secondDir}/{args.geodatFile}')
@@ -130,7 +284,9 @@ def simOffsetsProcessArgs1(fp):
     #
     return args.azOffsets, args.offsetsDat, myRegion, args.geodatFile, \
         secondGeodatFile, args.syncDat, args.fastMask, not args.noVel, \
-        byteOrder, args.ompThreads
+        byteOrder, args.ompThreads, args.iceRockWaterMask, args.iceMask, args.tiff, \
+        args.verticalCorrection, fp, failFile, args.minTol, args.percentSpeed, \
+        args.maxTol, args.maxSmoothRadius, args.smoothNIter
 
 
 def resolveRegion(args):
@@ -190,9 +346,18 @@ def checkFiles(myRegion, secondDir, args, fp):
     print('geodatFile= ', args.geodatFile)
     if not os.path.exists(args.geodatFile):
         printError('geodatFile  not found: ', args.geodatFile, fp)
-    # check geodat
-    maskFile = {False: myRegion.mask(),
-                True: myRegion.fastmask()}[args.fastMask]
+    # check mask
+    if args.iceRockWaterMask:
+        maskFile = myRegion.iceRockWaterMask()
+        if maskFile is None:
+            printError('--iceRockWaterMask: icerockwatermask not defined in region YAML', '', fp)
+    elif args.iceMask:
+        maskFile = myRegion.icemask()
+        if maskFile is None:
+            printError('--iceMask: icemask not defined in region YAML', '', fp)
+    else:
+        maskFile = {False: myRegion.mask(),
+                    True: myRegion.fastmask()}[args.fastMask]
     print('maskInputFile= ',  maskFile)
     if not os.path.exists(maskFile):
         printError('maskInputFile  not found: ', maskFile, fp)
@@ -353,8 +518,12 @@ def LLtoRA(lat, lon, geodatFile, dem=None):
     return r, a
 
 
-def groundToSlantRangeResolution(offsets):
-    """ compute conversion from slant to ground range resolution
+# nodata sentinel for vertical-correction grids, matches mosaicSource/common/common.h MINVCORRECT
+MINVCORRECT = -100
+
+
+def computeSinPsi(offsets):
+    """ sin of the local incidence angle psi = (Re+H)/Re * sin(look angle)
     This is a fairly crude approximation - e.g, earth curvature not included
     it is close enough for scaling offsets    """
     # get coordinates
@@ -373,9 +542,44 @@ def groundToSlantRangeResolution(offsets):
     thetaInc = thetaInc/(2*R*(Re+H))
     thetaInc = np.arccos(thetaInc)
     # compute incidence angle
-    sinPhic = (Re+H)/Re * np.sin(thetaInc)
+    return (Re+H)/Re * np.sin(thetaInc)
+
+
+def groundToSlantRangeResolution(offsets):
+    """ compute conversion from slant to ground range resolution
+    This is a fairly crude approximation - e.g, earth curvature not included
+    it is close enough for scaling offsets    """
+    slpR, slpA = offsets.geodatrxa.singleLookResolution()
+    sinPhic = computeSinPsi(offsets)
     groundToSlant = sinPhic/slpR
     return groundToSlant
+
+
+def computeVerticalCorrectionOffset(vcFile, offsets1, srsInfo, deltaT):
+    """
+    LOS contribution of the vertical-correction (submergence/emergence) grid to
+    the simulated range offset, in slant-range pixels.
+
+    Mirrors mosaic3d's make3DOffsets.c, which removes this contribution from a
+    measured range offset via
+        dDelta += dzdtSubmergence * cos(psi) * nDays/365.25
+    (in metres) before solving for horizontal velocity. For the forward
+    simulation here, the same term is SUBTRACTED (same convention chosen for
+    siminsar's -verticalCorrection phase case) so mosaic3d's += round-trips
+    correctly. Vertical motion has no azimuth-direction LOS component, so only
+    the range offset is affected.
+    """
+    vc = u.geoimage(geoType='scalar')
+    vc.readData(vcFile, tiff=True, epsg=srsInfo['epsg'], wktFile=srsInfo['wktFile'])
+    lat1, lon1 = offsets1.getLatLon()
+    xc1, yc1 = vc.geo.lltoxykm(lat1, lon1)
+    vc.setupInterp()
+    dzdtSubmergence = vc.interpGeo(xc1, yc1)
+    dzdtSubmergence = np.nan_to_num(dzdtSubmergence, nan=0.0)
+    dzdtSubmergence[dzdtSubmergence <= MINVCORRECT] = 0.0
+    slpR, slpA = offsets1.geodatrxa.singleLookResolution()
+    cosPsi = np.sqrt(1. - computeSinPsi(offsets1)**2)
+    return dzdtSubmergence * cosPsi * deltaT / 365.25 / slpR
 
 
 def fixBad(d, coeff, r1, a1):
@@ -448,7 +652,13 @@ def computeVelocityRA(velMap, offsets1, srsInfo):
     """
     # get velocity
     vel = u.geoimage(geoType='velocity')
-    vel.readData(velMap, epsg=srsInfo['epsg'], wktFile=srsInfo['wktFile'])
+    # Modern velMaps are a single GDAL file (.tif/.vrt, often with vx/vy as
+    # separate bands -- see geoimage._multibandComponents); legacy velMaps
+    # are flat binary + .vx.geodat/.vy.geodat sidecars, with no extension
+    # to key off of.
+    isTiff = velMap.lower().endswith(('.tif', '.vrt'))
+    vel.readData(velMap, epsg=srsInfo['epsg'], wktFile=srsInfo['wktFile'],
+                 tiff=isTiff)
 
     # compute xy angle, heading, and angle for rotation
     lat1, lon1 = offsets1.getLatLon()
@@ -462,6 +672,7 @@ def computeVelocityRA(velMap, offsets1, srsInfo):
     vxr, vyr, vr = vel.interpGeo(xps1, yps1)
     print('vx, vy', np.nanmean(vxr), np.nanmean(vyr), np.nanmean(vr))
     vr[np.isnan(vr)] = 0
+    speed = vr  # ground-speed magnitude, before vr is overwritten by the rotation below
     #
     # set fast regions to 8 to flag
     #
@@ -477,7 +688,7 @@ def computeVelocityRA(velMap, offsets1, srsInfo):
     vr = vxr * cosRot - vyr * sinRot
     va = vxr*sinRot + vyr * cosRot
     #
-    return vr, va
+    return vr, va, speed
 
 
 def printError(msg, var, fp):
@@ -490,7 +701,7 @@ def printError(msg, var, fp):
 
 
 def runSim(geodatFile, offsetsDat, dem, maskInputFile, syncDat,
-           byteOrder='MSB', ompThreads=4):
+           byteOrder='MSB', ompThreads=4, tiff=False):
     """
     runSim - run simulation with siminsar
     If no offsets.lat/lon/dat, create them
@@ -513,8 +724,9 @@ def runSim(geodatFile, offsetsDat, dem, maskInputFile, syncDat,
         if not os.path.exists(offsetsDat):
             u.myerror(f'siminsar.py - runSim - missing {offsetsDat:s} ')
     #
+    tiffFlag = '-tiff' if tiff else ''
     offsetsRoot = offsetsDat.replace('.dat', '').replace('.vrt', '')
-    command = f'siminsar {byteOrderFlag} -ompThreads {ompThreads} ' \
+    command = f'siminsar {byteOrderFlag} {tiffFlag} -ompThreads {ompThreads} ' \
         f'-center -toLL {offsetsDat} -mask ' \
         f'-xyDEM {dem}  {maskInputFile} {geodatFile} {offsetsRoot}'
     print(command)
@@ -528,9 +740,11 @@ def main():
     #
     # this will indicate a fail, unless program completes and removes
     #
-    fp = open('fail.simoffsets', 'w')
     azOffsets, offsetsDat, myRegion, geodatFile, secondGeoDatFile, syncDat, \
-        fastMask, useVel, byteOrder, ompThreads = simOffsetsProcessArgs1(fp)
+        fastMask, useVel, byteOrder, ompThreads, iceRockWaterMask, iceMask, tiff, \
+        verticalCorrection, fp, failFile, minTol, percentSpeed, maxTol, \
+        maxSmoothRadius, smoothNIter = \
+        simOffsetsProcessArgs1()
     #
     for key in myRegion.region:
         print(myRegion.region[key])
@@ -541,16 +755,27 @@ def main():
     #
     # run simoff
     #
-    latFile = offsetsDat.replace('.dat', '.lat').replace('.vrt', '.lat')
-    lonFile = offsetsDat.replace('.dat', '.lon').replace('.vrt', '.lon')
     maskFile = offsetsDat.replace('.dat', '.mask').replace('.vrt', '.mask')
-    maskInputFile = [myRegion.mask(), myRegion.fastmask()][fastMask]
+    if tiff:
+        llVrt = offsetsDat.replace('.dat', '.ll.vrt').replace('.vrt', '.ll.vrt')
+        needSim = not os.path.exists(llVrt) or not os.path.exists(maskFile) \
+                  or not os.path.exists(offsetsDat) or syncDat
+    else:
+        latFile = offsetsDat.replace('.dat', '.lat').replace('.vrt', '.lat')
+        lonFile = offsetsDat.replace('.dat', '.lon').replace('.vrt', '.lon')
+        needSim = not os.path.exists(latFile) or not os.path.exists(lonFile) \
+                  or not os.path.exists(maskFile) \
+                  or not os.path.exists(offsetsDat) or syncDat
+    if iceRockWaterMask:
+        maskInputFile = myRegion.iceRockWaterMask()
+    elif iceMask:
+        maskInputFile = myRegion.icemask()
+    else:
+        maskInputFile = [myRegion.mask(), myRegion.fastmask()][fastMask]
     #
-    if not os.path.exists(latFile) or not os.path.exists(lonFile) \
-            or not os.path.exists(maskFile) \
-            or not os.path.exists(offsetsDat) or syncDat:
+    if needSim:
         runSim(geodatFile, offsetsDat, myRegion.dem(), maskInputFile, syncDat,
-               byteOrder=byteOrder, ompThreads=ompThreads)
+               byteOrder=byteOrder, ompThreads=ompThreads, tiff=tiff)
     #
     # load offsets
     #
@@ -580,13 +805,14 @@ def main():
     #
     if useVel:
         print('Using velocity')
-        vr, va = computeVelocityRA(myRegion.velMap(), offsets1,
-                                   myRegion.srsInfo())
+        vr, va, speed = computeVelocityRA(myRegion.velMap(), offsets1,
+                                          myRegion.srsInfo())
         if offsets1.geodatrxa.lookdir == 'left':
             vr *= -1
     else:
         print('No velocity')
         vr, va = np.zeros(dr0.shape), np.zeros(dr0.shape)
+        speed = np.zeros(dr0.shape)
     #
     # Combine results
     #
@@ -595,6 +821,11 @@ def main():
     dr = dr0
     imissing = dr0 < -2.e8
     dr[np.isfinite(vr)] += drv[np.isfinite(vr)]
+    if useVel and verticalCorrection is not None:
+        print('Using vertical correction', verticalCorrection)
+        drVCorrect = computeVerticalCorrectionOffset(verticalCorrection, offsets1,
+                                                      myRegion.srsInfo(), deltaT)
+        dr[~imissing] -= drVCorrect[~imissing]
     dr[imissing] = -2.e9
     #
     # merge offsets
@@ -607,24 +838,49 @@ def main():
     da[imissing] = -2.0e9
     offsets1.azOff = da
     offsets1.rgOff = dr
-    # output
-    offsets1.writeOffsets(fileRoot=azOffsets, noDatFiles=True,
-                          byteOrder=byteOrder)
     #
-    offsets1.writeOffsetVrt(offsetsDat.replace('.dat', '.vrt'), [
-                            os.path.basename(
-                                offsetsDat.replace('.dat', '.dr')),
-                            os.path.basename(
-                                offsetsDat.replace('.dat', '.da'))],
-                            ['RangeOffsets', 'AzimuthOffsets'],
-                            byteOrder=byteOrder,
-                            additionalMetaData={'deltaT': deltaT})
+    # Variable smoothing-radius map (--minTol/--percentSpeed/--maxTol)
+    #
+    if minTol is not None:
+        Xv = np.clip(percentSpeed / 100. * speed, minTol, maxTol)  # m/yr
+        toleranceDr = Xv * groundToSlant * deltaT / 365.  # slant-range pixels
+        toleranceDa = Xv * deltaT / 365. / slpA  # azimuth pixels
+        radius = computeSmoothRadiusMap(dr, da, toleranceDr, toleranceDa,
+                                        maxSmoothRadius, smoothNIter)
+        _writeByteArrayAsTiff(offsetsDat.replace('.dat', '.smr.tif'), radius)
+    # output
+    extraMeta = {'deltaT': deltaT}
+    if useVel and verticalCorrection is not None:
+        extraMeta['verticalCorrection'] = verticalCorrection
+    if tiff:
+        drTif = os.path.abspath(offsetsDat.replace('.dat', '.dr.tif'))
+        daTif = os.path.abspath(offsetsDat.replace('.dat', '.da.tif'))
+        _writeArrayAsTiff(drTif, dr.astype(np.float32))
+        _writeArrayAsTiff(daTif, da.astype(np.float32))
+        if offsets1.meta is None:
+            offsets1.genMeta()
+        _writeTiffOffsetVrt(offsetsDat.replace('.dat', '.vrt'),
+                            drTif, daTif,
+                            offsets1.meta,
+                            additionalMetaData=extraMeta)
+    else:
+        offsets1.writeOffsets(fileRoot=azOffsets, noDatFiles=True,
+                              byteOrder=byteOrder)
+        #
+        offsets1.writeOffsetVrt(offsetsDat.replace('.dat', '.vrt'), [
+                                os.path.basename(
+                                    offsetsDat.replace('.dat', '.dr')),
+                                os.path.basename(
+                                    offsetsDat.replace('.dat', '.da'))],
+                                ['RangeOffsets', 'AzimuthOffsets'],
+                                byteOrder=byteOrder,
+                                additionalMetaData=extraMeta)
     #
     # remove flag file
     #
     fp.close()
-    if os.path.isfile('fail.simoffsets'):
-        os.remove('fail.simoffsets')
+    if os.path.isfile(failFile):
+        os.remove(failFile)
 
 
 if __name__ == "__main__":

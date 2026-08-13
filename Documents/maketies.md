@@ -21,19 +21,20 @@ maketies.py [years ...] [options]
 | `-winter` | False | Use winter tiepoints (passed to `setuptopstie.py` as `-winter`). |
 | `-phase` | False | Generate phase tiepoint plans (passed to `setuptopstie.py` as `-phase`; only active for Sentinel1/ALOS2). |
 | `-tieFiles FILE` | None | YAML file with time-varying tiepoints; passed to `setuptopstie.py`. |
+| `-noQuadFit` | False | Pass `--noQuadFit` to every `tie_script` invocation written to `refreshTies`, skipping the `-deltaBQ` quadratic baseline correction estimate (`rBaseline.quad`). |
 
 ---
 
 ## Behaviour
 
-1. **Detects sensor and paths** (`getSensorTrackInfo`) from `../sensor.yaml` or the working directory path (`TSX`, `CSK`, `Sentinel1`, `ALOS2`, `NISARTest`). Derives `tieDir` from the path accordingly.
+1. **Detects sensor and paths** (`getSensorTrackInfo`) from `../project.yaml` (preferred), falling back to `../sensor.yaml` with a warning, then falling back to path-based detection (`TSX`, `CSK`, `Sentinel1`, `ALOS2`, `NISARTest`). Derives `tieDir` from the path accordingly.
 2. Creates `tieDir/old/` if it does not exist.
 3. For each year:
    - Calls `setuptopstie.py [flags] YEAR` via `check_output` to generate `tie_planYEAR[-suffix]` in the current directory.
    - Moves any existing `tie_planYEAR` to `tieDir/old/` and renames the new one into `tieDir/`.
-   - If `setuptopstie.py` returned a non-zero image count, appends `tie_script tie_planYEAR` to `refreshTies`.
-4. Calls `makeAll` to produce `tie_planAll[-suffix]` covering all years and appends it to `refreshTies`.
-5. If a `tie_planSpecial[-suffix]` file exists, appends it to `refreshTies`.
+   - If `setuptopstie.py` returned a non-zero image count, appends `tie_script tie_planYEAR[--noQuadFit]` to `refreshTies`.
+4. Calls `makeAll` to produce `tie_planAll[-suffix]` covering all years and appends it to `refreshTies` (also with `--noQuadFit` if requested).
+5. If a `tie_planSpecial[-suffix]` file exists, appends it to `refreshTies` (also with `--noQuadFit` if requested).
 6. If `-run` was given, executes `refreshTies` via `csh` from `tieDir`.
 
 For multi-track glaciers (e.g. Jak, Helheim) a track-number suffix is appended to filenames to keep plans separate.

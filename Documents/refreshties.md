@@ -24,8 +24,10 @@ refreshties.py [years ...] [options]
 | `-phase` | False | Phase tiepoints mode — sets `-phase` flag on `maketies.py` and implies `-tiesOnly`. |
 | `-winter` | False | Use winter tiepoints (passes `-winter` to `maketies.py`). |
 | `-noPrompt` | False | Run without confirmation prompt. |
+| `-noQuadFit` | False | Pass `--noQuadFit` to `tie_script` (via `maketies.py`) to skip the `-deltaBQ` quadratic baseline correction estimate (`rBaseline.quad`). |
 | `--overWrite` | False | Pass `--overWrite` to `makeframetie.py` to rerun existing products. |
 | `--keepVz` | False | Pass `--keepVz` to `makeframetie.py` to retain `.vz` and `.vz.geodat` files. |
+| `--useSquint` | False | Pass `--useSquint` to `makeframetie.py` (squint heading correction in `mosaic3d` and `tiepoints -motion`). |
 
 ---
 
@@ -33,7 +35,7 @@ refreshties.py [years ...] [options]
 
 For each track directory in `toRun`, a thread is spawned that:
 
-1. Detects the sensor from `sensor.yaml` in the project root or from the path (`TSX`, `CSK`, `Sentinel1`, `ALOS2`, `NISAR`).
+1. Detects the sensor from `project.yaml` in the project root (preferred), falling back to `sensor.yaml` with a warning, then falling back to path-based detection (`TSX`, `CSK`, `Sentinel1`, `ALOS2`, `NISAR`).
 2. Unless `-velthumbsOnly`: runs `maketies.py -run [flags] [years]` inside the track directory.
 3. Unless `-tiesOnly`: changes into `tiepoints/` and runs `makeframetie.py [--overWrite] [--keepVz] tie_planYEAR[suffix]` for each year.
 

@@ -9,13 +9,23 @@ Created on Mon Feb  3 08:45:12 2020
 import argparse
 import utilities as u
 import os
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from subprocess import call
 import threading
 import mosaicfunc as mosf
 
 currentVersion = 4
 subVersion = 0
+
+# NISAR repeats every 12 days; cycle 1 started on this date.
+NISAR_CYCLE_EPOCH = datetime(2025, 9, 23)
+
+
+def nisarCycleDates(cycleNum):
+    '''Return (date1, date2) for the given 1-based NISAR cycle number.'''
+    date1 = NISAR_CYCLE_EPOCH + timedelta(days=(cycleNum - 1) * 12)
+    date2 = date1 + timedelta(days=11)
+    return date1, date2
 
 
 def makemosaicArgs():
@@ -68,20 +78,35 @@ def makemosaicArgs():
     parser.add_argument('--averageAll', action='store_true', default=False,
                         help='Create a single mosaic averaging all scenes '
                         'from --firstdate to --lastdate (no date splitting)')
+    parser.add_argument('--min', action='store_true', default=False,
+                        help='Mosaic = pixel-wise minimum across all inputs')
+    parser.add_argument('--max', action='store_true', default=False,
+                        help='Mosaic = pixel-wise maximum across all inputs')
     args = parser.parse_args()
     template = args.template_pos if args.template_pos is not None else args.template
     _, _, DBPaths, _, prefix, _, removePad, _, averageAllTemplate = mosf.mosaicTempArgs(template)
-    if args.removePad == 5:
+    if args.removePad != 5:
         removePad = args.removePad
     if prefix is None:
         prefix = args.prefix
+    # geoMosaicMode: CLI flag wins over template key
+    templateDict = mosf.readTemplate(template)
+    geoMosaicMode = templateDict.get('geoMosaicMode', None)
+    if args.min:
+        geoMosaicMode = 'min'
+    elif args.max:
+        geoMosaicMode = 'max'
+    # nisarCycle mode: generate products by 12-day cycle number
+    nisarCycle = bool(templateDict.get('nisarCycle', False))
     #
     firstDate = datetime.strptime(args.firstdate, "%Y-%m-%d")
     endDate = datetime.strptime(args.lastdate, "%Y-%m-%d")
     # CLI flag wins; template value is the fallback default
-    averageAll = args.averageAll or averageAllTemplate
-    # Adjust dates to standard intervals (skip for averageAll — user dates are used as-is)
-    if not args.noAdjustDate and not averageAll:
+    # min/max mode always produces a single mosaic over the full date range
+    averageAll = args.averageAll or averageAllTemplate or geoMosaicMode in ('min', 'max')
+    # Adjust dates to standard intervals (skip for averageAll or nisarCycle —
+    # in cycle mode, getProductList generates exact NISAR cycle boundaries)
+    if not args.noAdjustDate and not averageAll and not nisarCycle:
         firstDate = adjustFirstDate(firstDate, nisar=args.corr)
     if args.descendingOnly and args.ascendingOnly:
         u.myerror('descendingOnly and ascendingOnly flags mutually exclusive')
@@ -97,8 +122,9 @@ def makemosaicArgs():
               'ascendingOnly': args.ascendingOnly,
               'descendingOnly': args.descendingOnly,
               'removePad': removePad,
-              'prefix': prefix, 'dateDBs': DBPaths}
-    print(myArgs)
+              'prefix': prefix, 'dateDBs': DBPaths,
+              'geoMosaicMode': geoMosaicMode,
+              'nisarCycle': nisarCycle}
     return myArgs
 
 
@@ -128,7 +154,11 @@ def adjustFirstDate(firstdate, nisar=False):
 
 def getProductList(myArgs):
     '''
-    Generate list of products (date1, interval) to process
+    Generate list of products (date1, interval) to process.
+
+    In nisarCycle mode each entry also carries a 'cycle' key (int) so the
+    product can be labelled with the NISAR cycle number.
+
     Parameters
     ----------
     myArgs : dict
@@ -136,47 +166,68 @@ def getProductList(myArgs):
 
     Returns
     -------
-    myProducts: .
-        list of products to process
+    myProducts : list of dicts  {'date1', 'date2'[, 'cycle']}
     '''
-    if myArgs.get('averageAll'):
+    if myArgs.get('averageAll') or myArgs.get('geoMosaicMode') in ('min', 'max'):
         return [{'date1': myArgs['firstDate'], 'date2': myArgs['lastDate']}]
-    firstDate = None
+
+    firstDate = myArgs['firstDate']
+    lastDate = myArgs['lastDate']
+    print(f'Date Range = {firstDate.strftime("%Y-%m-%d")}'
+          f' {lastDate.strftime("%Y-%m-%d")}')
+
+    if myArgs.get('nisarCycle'):
+        # Generate products aligned to NISAR 12-day repeat cycles.
+        # Find the first cycle whose start is >= firstDate (backing up one
+        # cycle to avoid missing a cycle that straddles the boundary).
+        delta0 = max(0, (firstDate - NISAR_CYCLE_EPOCH).days)
+        startCycle = max(1, delta0 // 12)  # one cycle before to be safe
+        myDates = []
+        cycleNum = startCycle
+        while True:
+            date1, date2 = nisarCycleDates(cycleNum)
+            if date1 > lastDate:
+                break
+            if date1 >= firstDate and date2 <= lastDate:
+                myDates.append({'date1': date1, 'date2': date2,
+                                'cycle': cycleNum})
+            cycleNum += 1
+        return myDates
+
+    # --- standard S1 date-range mode ---
+    anchorDate = None
     if myArgs['noAdjustDate']:
-        firstDate = myArgs['firstDate']
+        anchorDate = firstDate
     resume6Day = datetime(2100, 1, 1) if myArgs.get('corr') \
         else datetime(2025, 4, 1)
     sDateRanges = mosf.standardDates(nDays=myArgs['nDays'],
-                                     firstDate=firstDate,
+                                     firstDate=anchorDate,
                                      resume6DayDates=resume6Day)
     myDates = []
-    print(f'Date Range = {myArgs["firstDate"].strftime("%Y-%m-%d")}'
-          f' {myArgs["lastDate"].strftime("%Y-%m-%d")}')
     for dateRange in sDateRanges:
-        # print(dateRange['date1'], myArgs['firstDate'],myArgs['lastDate'])
-        if dateRange['date1'] < myArgs['firstDate'] or \
-                dateRange['date2'] > myArgs['lastDate']:
-            continue  # Out of range so skip
+        if dateRange['date1'] < firstDate or dateRange['date2'] > lastDate:
+            continue
         myDates.append(dateRange)
     return myDates
 
 
-def makeImageMosaic(date1, date2, myArgs):
+def makeImageMosaic(date1, date2, myArgs, cycleNum=None):
     '''
     Spawn the mosaic command.
     Parameters
     ----------
     date1, date2 : datetime
         First and second date.
-    calibrate : bool
-        To calibrate or not calibrate.
+    myArgs : dict
+        Arguments that control mosaics.
+    cycleNum : int or None
+        When set (nisarCycle mode), appends --cycleTag cycle<NNN> to the
+        setupimagemosaic command so the product is labelled accordingly.
     Returns
     -------
     None.
-
     '''
     nDays = (date2-date1).days + 1
-    
     command = f'setupimagemosaic.py --firstdate {date1.strftime("%Y-%m-%d")}' \
         f' --nDays {nDays} --template {myArgs["templateFile"]} ' \
         f'--removePad {myArgs["removePad"]}'
@@ -184,9 +235,14 @@ def makeImageMosaic(date1, date2, myArgs):
                 'setupOnly', 'descendingOnly', 'ascendingOnly', 'averageAll']:
         if myArgs[key]:
             command += f' --{key}'
+    if myArgs.get('geoMosaicMode') == 'min':
+        command += ' --min'
+    elif myArgs.get('geoMosaicMode') == 'max':
+        command += ' --max'
+    if cycleNum is not None:
+        command += f' --cycleTag cycle{cycleNum:03d}'
     command += f' --prefix {myArgs["prefix"]}'
     print(f'\n{command}')
-    # make add this mosaic to thread list
     call(command, shell=True)  # , executable='/bin/csh')
 
 
@@ -198,9 +254,9 @@ def makeProdName(prefix, date1, date2):
     return prodName
 
 
-def checkProduct(date1, date2, myArgs, posting):
+def checkProduct(date1, date2, myArgs, posting, cycleNum=None):
     '''
-    Checks if a product has already been produced. Verifies that tifs exist
+    Checks if a product has already been produced. Verifies that tifs exist.
     Parameters
     ----------
     date1 : datetime
@@ -209,11 +265,12 @@ def checkProduct(date1, date2, myArgs, posting):
         Second date.
     myArgs : dict
         parameters defining mosaic creation.
-
+    cycleNum : int or None
+        When set (nisarCycle mode), the cycle tag is folded into the prefix
+        when checking for the product directory and files.
     Returns
     -------
-    exists bool,
-        return True if directory and image products exist.
+    exists : bool — True if directory and image products both exist.
     '''
     if myArgs.get('corr'):
         calString = 'corr'
@@ -221,10 +278,12 @@ def checkProduct(date1, date2, myArgs, posting):
         calString = 'calibrated'
     else:
         calString = 'uncalibrated'
-    #
-    dirName = f'{myArgs["prefix"]}_{calString}.' \
+    prefix = myArgs["prefix"]
+    if cycleNum is not None:
+        prefix = f'{prefix}_cycle{cycleNum:03d}'
+    dirName = f'{prefix}_{calString}.' \
         f'{date1.strftime("%Y-%m-%d")}.{date2.strftime("%Y-%m-%d")}'
-    prodName = makeProdName(myArgs["prefix"], date1, date2)
+    prodName = makeProdName(prefix, date1, date2)
     if not os.path.exists(dirName):
         return False  # No product directory so return false
     # check image products exist
@@ -248,21 +307,27 @@ def setupProducts(myProds, myArgs, posting):
     Parameters
     ----------
     myProds : list
-        list of start and end dates {'date1': datetime, 'date2': datetime}.
+        list of dicts {'date1': datetime, 'date2': datetime[, 'cycle': int]}.
+    myArgs : dict
+        Arguments that control mosaics.
+    posting : int
+        Pixel posting (metres) used to verify existing products.
     Returns
     -------
-    threads; list of threads.
+    threads : list of threads.
     '''
     threads = []
     for myProd in myProds:
+        cycleNum = myProd.get('cycle')
         prodExists = checkProduct(myProd['date1'], myProd['date2'], myArgs,
-                                  posting)
+                                  posting, cycleNum=cycleNum)
         # Put product in queue if doesn't exist or if reset mode
         if not prodExists or myArgs['reset'] or myArgs['noReprocess']:
             threads.append(threading.Thread(target=makeImageMosaic,
                                             args=[myProd['date1'],
                                                   myProd['date2'],
-                                                  myArgs]))
+                                                  myArgs],
+                                            kwargs={'cycleNum': cycleNum}))
     return threads
 
 
@@ -288,21 +353,13 @@ def main():
     ''' Produce image mosaics '''
     # get args
     myArgs = makemosaicArgs()
-   # print(myArgs)
-    #u.myerror('sto')
     posting = mosf.readTemplate(myArgs['templateFile'])['dx']
     if not myArgs['noCheckEndDate']:
         checkLastDateAgainsDB(myArgs)
     myProds = getProductList(myArgs)
-    print(myProds)
-    #u.myerror('stop')
-    #
     threads = setupProducts(myProds, myArgs, posting)
     maxThreads = 1
-    print(len(threads))
-    #u.myerror('asdf')
     u.runMyThreads(threads, maxThreads, 'geomosaic')
-    print(myProds)
 
 
 if __name__ == "__main__":

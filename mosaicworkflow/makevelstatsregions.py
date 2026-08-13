@@ -141,13 +141,11 @@ def main():
 
     velFiles = u.dols('ls -d *_*/velocity')
     frameDirs = u.dols('ls -d velocityStats/*-*')
-    print(velFiles)
-    print(frameDirs)
+    print(f'Found {len(velFiles)} velocity files for {len(frameDirs)} velocityStats frame-range dirs')
 
     for frameDir in frameDirs:
         frameDir = frameDir.split('/')[-1]
         frame1, frame2 = (int(s[len(framePrefix):]) for s in frameDir.split('-'))
-        print(frame1, frame2)
 
         xMin = yMin = 1e8
         xMax = yMax = -1e8
@@ -167,13 +165,23 @@ def main():
             if os.path.exists(os.path.join(d, 'Exclude')):
                 print(f'\033[1m--- Skipping {velFile} because Exclude file found\033[0m')
                 continue
+            if os.path.exists(os.path.join(d, 'Exclude.pending')):
+                # Soft exclude: still use this frame's velocity grid for the
+                # region BOUNDS (vel_thumbs now produces a blank map even for
+                # pending frames). Without this, a range whose frames are all
+                # pending never gets a real extent -- the thumb header keeps the
+                # "0 0 0 0" auto-size sentinel, velocityStats can't build a
+                # grid, and autocleanNISAR then rejects everything against the
+                # stale stats. The frame's (blank) VALUES still contribute
+                # nothing to the stats themselves.
+                print(f'--- Using {velFile} bounds despite Exclude.pending '
+                      f'(blank map, extent only)')
             if frame1 <= frame <= frame2:
                 bounds = _boundsFromVelDir(velFile)
                 if bounds is None:
                     print(f'Skipping {velFile}: no mosaicOffsets.vrt or .vx.geodat')
                     continue
                 x1, y1, x2, y2, dx, dy = bounds
-                print(x1, y1, x2, y2)
                 if x1 < xMin:
                     xMin = x1
                 if y1 < yMin:
@@ -188,13 +196,12 @@ def main():
             print(f'No velocity files found for frame range {frameDir}, skipping')
             continue
 
-        print(xMin, yMin, xMax, yMax)
         dx, dy = lastDxDy
         x0 = round(xMin) - pad
         y0 = round(yMin) - pad
         xs = round(xMax + pad - x0) + pad
         ys = round(yMax + pad - y0) + pad
-        print('resolution  = "', x0, y0, xs, ys, dx, dy, '"')
+        print(f'{frameDir}: resolution ="', x0, y0, xs, ys, dx, dy, '"')
         writeVelThumb(frameDir, x0, y0, dx, dy, xs, ys, baseDir, dem=dem)
 
 
