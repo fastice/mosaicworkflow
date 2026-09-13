@@ -44,6 +44,7 @@ Outputs are all the final archive-ready products that get delivered to NSIDC.
 - [cleanoffmerge](Documents/cleanoffmerge.md) — clean and merge offset products
 - [initRAReference](Documents/initRAReference.md) — initialise range/azimuth reference
 - [velocityStats](Documents/velocityStats.md) — velocity statistics utilities
+- [checkvelsize](Documents/checkvelsize.md) — check per-frame velocity mosaics share a common grid
 
 ## For Further Information
 

@@ -73,7 +73,14 @@ def getRefreshArgs():
     )
     parser.add_argument(
         '--yaml', action='store_true',
-        help='Pass --yaml to maketies/tie_script to write rBaseline files in YAML format'
+        help='Deprecated no-op: maketies/makeframetie.py write YAML '
+             'rBaseline/az.est files by default now. Still accepted so '
+             'existing callers keep working; use --noYaml for the old format'
+    )
+    parser.add_argument(
+        '--noYaml', action='store_true',
+        help='Pass --noYaml to maketies/makeframetie.py to write text '
+             '(not YAML) rBaseline/az.est files'
     )
     parser.add_argument(
         '--overWrite', action='store_true',
@@ -84,9 +91,18 @@ def getRefreshArgs():
         help='Pass --keepVz to makeframetie.py to retain .vz and .vz.geodat files'
     )
     parser.add_argument(
+        '--useAzIonosphere', action='store_true',
+        help='Pass --useAzIonosphere to makeframetie.py (azimuth ionosphere '
+             'correction used where the azparams fit prefers it); default off')
+    parser.add_argument(
         '--useSquint', action='store_true',
         help='Pass --useSquint to makeframetie.py (squint heading correction in mosaic3d '
              'and tiepoints -motion)'
+    )
+    parser.add_argument(
+        '--tiff', action='store_true',
+        help='Pass --tiff to makeframetie.py/vel_thumbs so velocity products are written '
+             'as GeoTIFF (mosaic3d -GTiff) regardless of project.yaml velThumbOutput'
     )
     parser.add_argument(
         '-nThreads', '--nThreads', type=int, default=24,
@@ -119,15 +135,19 @@ def getRefreshArgs():
         flags['phaseFlag'] = ' -phase '
     if args.noQuadFit:
         flags['noQuadFitFlag'] = ' -noQuadFit '
-    if args.yaml:
-        flags['yamlFlag'] = ' --yaml '
+    # maketies/makeframetie.py flipped from an opt-in --yaml to an opt-out
+    # --noYaml (YAML is the default now), so passing --yaml through makes
+    # argparse reject BOTH commands and the whole tie stage silently does
+    # nothing. --yaml is kept as a no-op for callers that still send it.
+    if args.noYaml:
+        flags['yamlFlag'] = ' --noYaml '
 
     if velthumbsOnly and tiesOnly:
         u.myerror('Cannot use both velthumbsOnly and tiesOnly')
 
     usePrompt = not args.noPrompt
 
-    return years, toRun, tiesOnly, velthumbsOnly, flags, usePrompt, args.tieFiles, args.overWrite, args.keepVz, args.useSquint, args.nThreads
+    return years, toRun, tiesOnly, velthumbsOnly, flags, usePrompt, args.tieFiles, args.overWrite, args.keepVz, args.useSquint, args.useAzIonosphere, args.tiff, args.nThreads
 
 
 def clearPendingExcludes(rundir):
@@ -148,7 +168,7 @@ def clearPendingExcludes(rundir):
 
 
 def runTies(rundir, years, tiesOnly, velthumbsOnly, tieFiles, flags, overWrite, keepVz,
-           useSquint=False):
+           useSquint=False, useAzIonosphere=False, tiff=False, failures=None):
     cwd = os.getcwd()
     # Clear stale soft-excludes before maketies/setuptopstie build the tie plan,
     # so a refresh always starts clean and only genuinely-failing frames end up
@@ -223,31 +243,59 @@ def runTies(rundir, years, tiesOnly, velthumbsOnly, tieFiles, flags, overWrite, 
         keepVzFlag = ' --keepVz' if keepVz else ''
         yamlFlag = flags['yamlFlag']
         squintFlag = ' --useSquint' if useSquint else ''
+        azIonFlag = ' --useAzIonosphere' if useAzIonosphere else ''
+        tiffFlag = ' --tiff' if tiff else ''
         for year in years:
-            command += f'; makeframetie.py{overWriteFlag}{keepVzFlag}{squintFlag}{yamlFlag} tie_plan{year}{suffix}'
+            command += f'; makeframetie.py{overWriteFlag}{keepVzFlag}{squintFlag}{azIonFlag}{tiffFlag}{yamlFlag} tie_plan{year}{suffix}'
     print(command)
     # print('suffix:',suffix)
-    call(command, shell=True, executable='/bin/csh', stdout=fout, stderr=ferr)
+    returnCode = call(command, shell=True, executable='/bin/csh',
+                      stdout=fout, stderr=ferr)
     fout.close()
     ferr.close()
+    # csh reports the status of the LAST command in the ';' chain, so this
+    # catches a failing makeframetie.py (or maketies under -tiesOnly) but can
+    # still miss an earlier stage that a later one papers over. Worth having
+    # anyway: a silently-failing chain left the master input frozen for 11
+    # nights while every run reported OK.
+    if returnCode != 0:
+        u.mywarning(f'refreshties.py: {rundir} tie chain exited '
+                    f'{returnCode} -- see {rundir}/stderr')
+        if failures is not None:
+            failures.append((rundir, returnCode))
+    return returnCode
 
 
 def main():
     years, toRun, tiesOnly, velthumbsOnly, flags, usePrompt, tieFiles, overWrite, keepVz, \
-        useSquint, nThreads = getRefreshArgs()
+        useSquint, useAzIonosphere, tiff, nThreads = getRefreshArgs()
     print(years)
     threads = []
+    # list.append is atomic under the GIL, so the worker threads can share this
+    # without a lock (same pattern as autoupdate.py's per-orbit failure list).
+    failures = []
 
     for runfile in toRun:
         thread = threading.Thread(target=runTies,
                                   args=[runfile, years, tiesOnly,
                                         velthumbsOnly, tieFiles, flags, overWrite, keepVz,
-                                        useSquint])
+                                        useSquint, useAzIonosphere, tiff, failures])
         threads.append(thread)
     #
     # prompt to run jobs
     #
     u.runMyThreads(threads, nThreads, 'Refresh Ties ', prompt=usePrompt)
+    #
+    # Exit non-zero so callers (setupNISARTracks, autoupdateNISAR's nightly
+    # summary/email) see a failing tie stage instead of a silent no-op.
+    # sys.exit is used directly rather than u.myerror, which exits 0.
+    #
+    if failures:
+        for rundir, returnCode in sorted(failures):
+            print(f'  {rundir}: exit {returnCode}  (see {rundir}/stderr)')
+        u.mywarning(f'refreshties.py: {len(failures)} of {len(toRun)} '
+                    'tracks failed')
+        sys.exit(1)
 
 
 if __name__ == '__main__':

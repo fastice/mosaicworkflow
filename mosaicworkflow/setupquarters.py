@@ -195,6 +195,43 @@ def resolveUseSquint(template, templatePath, cliUseSquint=False):
     return template
 
 
+def resolveBooleanBaseFlag(template, templatePath, key, mosaic3dFlag, cliValue=False):
+    '''
+    Resolve a boolean mosaic3d flag from CLI, template, and project.yaml, then append
+    -mosaic3dFlag to baseFlags when the resolved value is True.
+
+    Priority (highest first), matching resolveUseSquint():
+      1. CLI flag (True forces on; a store_true flag cannot express "off")
+      2. template key (True/False/None; None defers to project.yaml)
+      3. project.yaml key
+      4. False -> nothing appended, mosaic3d's own default applies
+
+    Template takes precedence over project.yaml; a warning is emitted when they disagree.
+    '''
+    if cliValue:
+        resolved = True
+    else:
+        templateVal = template.get(key, None)
+        projectVal = None
+        projectYamlPath = locateProjectYaml(template, templatePath)
+        if projectYamlPath is not None:
+            with open(projectYamlPath, 'r') as fp:
+                projectData = yaml.safe_load(fp) or {}
+            projectVal = projectData.get(key, None)
+        if templateVal is not None:
+            resolved = templateVal
+            if projectVal is not None and projectVal != templateVal:
+                u.mywarning(f'resolveBooleanBaseFlag {key}: template value {templateVal} '
+                            f'overrides project.yaml value {projectVal}')
+        elif projectVal is not None:
+            resolved = projectVal
+        else:
+            resolved = False
+    if resolved and f'-{mosaic3dFlag}' not in template['baseFlags']:
+        template['baseFlags'] += f' -{mosaic3dFlag}'
+    return template
+
+
 def resolveNumericBaseFlag(template, templatePath, key, mosaic3dFlag, cliValue=None):
     '''
     Resolve a numeric mosaic3d flag from CLI, template, and project.yaml, then
@@ -265,6 +302,28 @@ def processFlags(args, template):
     template = resolveNumericBaseFlag(template, args.template, 'timePhaseThresh',
                                      'timePhaseThresh',
                                      cliValue=getattr(args, 'timePhaseThresh', None))
+    # Joint crossing-orbit solvers (mosaic3d default since 2026-08-29).  The gates are
+    # n-normalised: a pixel is dropped when sigmaWorst*sqrt(n) exceeds the threshold, i.e.
+    # when the INPUT DATA is noisy rather than when coverage is merely thin.
+    template = resolveNumericBaseFlag(template, args.template, 'jointMaxSigmaPhase',
+                                     'jointMaxSigmaPhase',
+                                     cliValue=getattr(args, 'jointMaxSigmaPhase', None))
+    template = resolveNumericBaseFlag(template, args.template, 'jointMaxSigmaRange',
+                                     'jointMaxSigmaRange',
+                                     cliValue=getattr(args, 'jointMaxSigmaRange', None))
+    template = resolveBooleanBaseFlag(template, args.template, 'legacyPairPhase',
+                                      'legacyPairPhase',
+                                      cliValue=getattr(args, 'legacyPairPhase', False))
+    template = resolveBooleanBaseFlag(template, args.template, 'legacyPairRange',
+                                      'legacyPairRange',
+                                      cliValue=getattr(args, 'legacyPairRange', False))
+    # project.yaml key and mosaic3d flag are deliberately named differently: the
+    # yaml key reads as a policy ("apply the correction"), the flag as what the
+    # binary does with it.
+    template = resolveBooleanBaseFlag(template, args.template,
+                                      'applyAzimuthIonosphereCorrection',
+                                      'useAzIonosphere',
+                                      cliValue=getattr(args, 'useAzIonosphere', False))
     return flags
 
 
@@ -328,6 +387,16 @@ def processQArgs():
                         help='Pass -useSquint to mosaic3d (overrides template/project.yaml)')
     parser.add_argument('--timeThresh', type=float, default=None,
                         help='Max days between crossing-orbit offset pairs (mosaic3d default 12)')
+    parser.add_argument('--jointMaxSigmaPhase', type=float, default=None,
+                        help='Reject crossing-PHASE pixels with sigmaWorst*sqrt(n) > this (m/yr); '
+                             'overrides template and project.yaml [mosaic3d default 35]')
+    parser.add_argument('--jointMaxSigmaRange', type=float, default=None,
+                        help='Same for crossing-RANGE; overrides template and project.yaml '
+                             '[mosaic3d default 100]')
+    parser.add_argument('--legacyPairPhase', action='store_true', default=False,
+                        help='Use the ORIGINAL pairwise crossing-phase solver')
+    parser.add_argument('--legacyPairRange', action='store_true', default=False,
+                        help='Use the ORIGINAL pairwise crossing-range solver')
     parser.add_argument('--timePhaseThresh', type=float, default=None,
                         help='Max days between crossing-orbit phase pairs (mosaic3d default 548)')
     # template
@@ -557,15 +626,20 @@ def writeInputFileQ(infile, xdim, ydim, dataTakes, flags):
 
 def changeToNoCull(line):
     mainDir = os.path.dirname(line.split()[1])
-    az = sorted(glob.glob(f'{mainDir}/*.interp.da'))[0]
+    az = u.globOffsetProducts(f'{mainDir}/*.interp.da')[0]
     azname = os.path.basename(az)
-    rg = sorted(glob.glob(f'{mainDir}/*.interp.dr'))[0]
+    rg = u.globOffsetProducts(f'{mainDir}/*.interp.dr')[0]
     rgname = os.path.basename(rg)
     dataTakeSlow = line.replace('azimuth.offsets', azname)
     dataTakeSlow = dataTakeSlow.replace('range.offsets', rgname)
     new = [dataTakeSlow]
-    if os.path.exists(f'{mainDir}/fast/azimuth.offsets.fast') and \
-            os.path.exists(f'{mainDir}/fast/range.offsets.fast'):
+    # The fast offsets are raw binary in the legacy path and <name>.tif in
+    # tiff mode, so accept either. mosaic3d resolves the name written below
+    # through checkForVrt(), which finds the .vrt in both cases.
+    def fastOffsetsExist(component):
+        base = f'{mainDir}/fast/{component}.offsets.fast'
+        return os.path.exists(base) or os.path.exists(f'{base}.tif')
+    if fastOffsetsExist('azimuth') and fastOffsetsExist('range'):
         dataTakeFast = line.replace('azimuth.offsets',
                                     'fast/azimuth.offsets.fast')
         dataTakeFast = dataTakeFast.replace('range.offsets',
@@ -643,6 +717,13 @@ def interpMosiacs(piecesFiles, piecesGeodats, outDir, interpSize, baseFlags,
     '''
     Call intfloat to fill holes
     '''
+    # DELIBERATE: only .vx/.vy (and .dT) are gap-filled.  The errors are NOT interpolated,
+    # so an interpolated pixel carries a velocity with ex/ey left at no-data -- that absence
+    # IS the interpolation flag, and it is the only per-pixel marker of which values were
+    # measured and which were filled.  Do NOT "fix" this by interpolating the errors: it
+    # destroys the flag, and it hands filled pixels a distance-averaged error that understates
+    # their true uncertainty (measured ~12 m/yr against a reported ~3).  Consumers that want
+    # measured-only data mask on ex > 0; validateMosaic does exactly that.
     components = ['.vx', '.vy']
     if '-timeOverlap' in baseFlags:
         components.append('.dT')
@@ -747,6 +828,7 @@ def writeQTiff(pieceFile, outDir, baseFlags, epsg, wktFile):
                          computeStats=False)
     # Errors
     errImage = u.geoimage(geoType='error', verbose=False)
+    # from masked/, NOT interp/ -- errors are deliberately not gap-filled; see interpMosiacs()
     errImage.readData(f'{outDir}/masked/{pieceFile}')
     errImage.writeMyTiff(velRootOut, epsg=epsg, wktFile=wktFile,
                          computeStats=False)
@@ -929,22 +1011,53 @@ def writeRGBTiff(tiffFile, rgb, template):
 
 def addLabel(rgb, template):
     '''
-    Label image with ESA credit
+    Burn the data-source credit block into the browse image.
+
+    The lead line names the WORKFLOW, not the product, so it applies to every region --
+    hence no epsg test here.  It used to read 'NASA MEaSUREs GrIMP Ice Velocity Map' and was
+    stripped for non-Greenland products because that wording asserted the product itself was
+    GrIMP; the current wording does not, so Antarctic browses carry it too.
+
+    The lead line carries the 'one or more of the following' hedge: the list names every
+    sensor the workflow CAN use, and any subset may have contributed to a given mosaic.  Each
+    sensor line therefore stands alone, naming both its processor and its archive rather than
+    factoring either into a shared clause.
+
+    The list is static, so a NISAR-only product still shows the Sentinel-1, TerraSAR-X and
+    Landsat lines; the hedge is what makes that correct rather than misleading.  Making it
+    reflect the actual input list would mean reading the sensors out of the mosaic input
+    file; not done here.
     '''
-    labels = ['NASA MEaSUREs GrIMP Ice Velocity Map',
-              'Produced using one or more of the following:',
-              'Copernicus Sentinel 1 data processed by ESA',
-              'TerraSAR-X/TanDEM-X data processed by DLR',
-              'Landsat 8/9 data processed by USGS']
-    # Remove GrIMP for non Greenland products
-    if template['epsg'] != 3413:
-        labels = labels[1:]
+    labels = ['Ice Velocity Map produced with the NASA MEaSUREs GrIMP workflow using one or more of the following',
+              'NISAR data processed by NASA/JPL-Caltech, archived at the ASF DAAC',
+              'Copernicus Sentinel 1 data processed by ESA, archived at the ASF DAAC',
+              'TerraSAR-X/TanDEM-X data processed and archived by DLR',
+              'Landsat 8/9 data processed and archived by USGS']
     if 'xLabel' not in template or 'yLabel' not in template:
         return
     #
-    font = ImageFont.truetype("/usr/share/fonts/dejavu/DejaVuSans.ttf", 75)
-    dy = 80
-    xl, yl = template['xLabel'], rgb.shape[0] - template['yLabel']
+    #  Fit the block to the canvas.  PIL clips at the edge WITHOUT complaining, so a wording
+    #  change that outgrows the space set by xLabel silently truncates the text -- which is
+    #  exactly what happened when the credit block was revised.  Shift left first (keeps the
+    #  font size), then shrink the font only if the widest line cannot fit at all.
+    fontSize, dy, margin = 75, 80, 40
+    font = ImageFont.truetype("/usr/share/fonts/dejavu/DejaVuSans.ttf", fontSize)
+    width = rgb.shape[1]
+    xl = template['xLabel']
+    maxW = max(font.getbbox(t)[2] for t in labels)
+    if xl + maxW > width - margin:
+        xlNew = width - maxW - margin
+        if xlNew < margin:
+            #  Too wide even hard against the left edge: scale the font to fit.
+            fontSize = max(int(fontSize * (width - 2 * margin) / maxW), 10)
+            font = ImageFont.truetype("/usr/share/fonts/dejavu/DejaVuSans.ttf", fontSize)
+            dy = int(fontSize * 80 / 75)
+            maxW = max(font.getbbox(t)[2] for t in labels)
+            xlNew = max(width - maxW - margin, margin)
+        print(f'addLabel: credit block ({maxW} px) does not fit at xLabel={xl} on a '
+              f'{width} px image; using xLabel={xlNew}, font {fontSize}')
+        xl = xlNew
+    yl = rgb.shape[0] - template['yLabel']
     #
     #  Label each band
     for bnum in range(0, 3):
@@ -1382,7 +1495,13 @@ def runSubMosaic(outPath, inputFileName, outFileName, baseFlags, firstDate,
             f'pieces/{inputFileName} {dem} pieces/{outFileName}'
         print(command, file=stdout)
         # , executable='/bin/csh'
-        returnCode = call(command, shell=True, stdout=stdout, stderr=stderr)
+        # libgdal pulls in libopenblas, whose constructor builds a thread pool
+        # sized to the machine before main() runs; no GrIMP code calls BLAS.
+        # Must be set before the process starts. OPENBLAS_NUM_THREADS, not
+        # OMP_NUM_THREADS -- the latter would serialise mosaic3d's own OpenMP.
+        blasEnv = dict(os.environ, OPENBLAS_NUM_THREADS='1')
+        returnCode = call(command, shell=True, stdout=stdout, stderr=stderr,
+                          env=blasEnv)
         # flush so the sector log is complete on disk before it is inspected
         stdout.flush()
         stderr.flush()

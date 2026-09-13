@@ -23,6 +23,8 @@ Homepage = "https://github.com/fastice/mosaicworkflow"
 Repository = "https://github.com/fastice/mosaicworkflow"
 
 [project.scripts]
+checkvelsize = "mosaicworkflow.checkvelsize:main"
+"checkvelsize.py" = "mosaicworkflow.checkvelsize:main"
 grepdate = "mosaicworkflow.grepdate:main"
 "grepdate.py" = "mosaicworkflow.grepdate:main"
 grepnisar = "mosaicworkflow.grepnisar:main"

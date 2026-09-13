@@ -35,6 +35,7 @@ import argparse
 import glob
 import os
 import threading
+import traceback
 import xml.etree.ElementTree as ET
 import numpy as np
 import yaml
@@ -69,10 +70,26 @@ def resolveRegionDef(trackDir):
     return s.defaultRegionDefs(None, regionFile=regionPath)
 
 
-def findVelStatsDir(frameNum, framePattern='00??'):
-    ''' Return the velocityStats/<f1>-<f2> range-dir name containing frameNum,
-    using the same tens-digit grouping as
+def findVelStatsDir(frameNum, framePattern='00??', trackDir=None):
+    ''' Return the velocityStats/<f1>-<f2> range-dir name containing frameNum.
+    When trackDir is given, scan the ranges that actually exist there (so a
+    single track-wide range such as 0000-0099 -- project.yaml
+    velocityStatsRegions: track -- is found, preferring one that already holds
+    a velocity composite); otherwise, or when no range contains frameNum, fall
+    back to the tens-digit grouping of
     setupNISARTracks.py:_vel_stats_dirs_for_track(). '''
+    if trackDir is not None:
+        hits = []
+        for vsd in sorted(glob.glob(os.path.join(trackDir, 'velocityStats', '*-*'))):
+            try:
+                f1, f2 = (int(x) for x in os.path.basename(vsd).split('-'))
+            except ValueError:
+                continue
+            if f1 <= frameNum <= f2:
+                hits.append(vsd)
+        if hits:
+            withData = [h for h in hits if os.path.exists(os.path.join(h, 'velocity.vr.tif'))]
+            return os.path.basename((withData or hits)[0])
     prefix = framePattern.split('?')[0]
     tailLen = framePattern.count('?') - 1
     frameStr = f'{frameNum:0{len(prefix) + framePattern.count("?")}d}'
@@ -105,7 +122,40 @@ def readIonCorrection(frameDir, rangeOff):
         return None
     ion = u.offsets(vrtFile=ionVrt, verbose=False)
     ion.readVrt({'ionosphereCorrection': 'ionCorrection'})
-    return ion.ionCorrection
+    corr = ion.ionCorrection
+    if corr.shape == rangeOff.off.shape:
+        return corr
+    # The merged ionosphere product can be SHORTER than the merged offsets when
+    # a constituent frame has no ionosphere estimate at all (a 10-second
+    # dual-bandwidth partial frame whose chosen granule carries no unwrapped
+    # phase: Antarctica80 track-119/3678_123, track-120/3679_126, track-104/
+    # 4701_123). Both rasters share the radar grid and its geotransform, so
+    # place the correction by its azimuth-time offset and leave the uncovered
+    # rows at zero (no correction) rather than dying on the shape mismatch and
+    # leaving the whole virtual frame without an autoclean mask or a tie.
+    try:
+        gtR = gdal.Open(rangeOff.vrtFile).GetGeoTransform()
+        gtI = gdal.Open(ionVrt).GetGeoTransform()
+        colOff = int(round((gtI[0] - gtR[0]) / gtR[1]))
+        rowOff = int(round((gtI[3] - gtR[3]) / gtR[5]))
+    except Exception as e:
+        u.mywarning(f'readIonCorrection: {ionVrt} shape {corr.shape} != offsets '
+                    f'{rangeOff.off.shape} and no usable geotransform ({e}); '
+                    f'ignoring the ionosphere correction for this frame')
+        return None
+    full = np.zeros(rangeOff.off.shape, dtype=corr.dtype)
+    r0, c0 = max(rowOff, 0), max(colOff, 0)
+    r1 = min(rowOff + corr.shape[0], full.shape[0])
+    c1 = min(colOff + corr.shape[1], full.shape[1])
+    if r1 <= r0 or c1 <= c0:
+        u.mywarning(f'readIonCorrection: {ionVrt} does not overlap the offsets grid; '
+                    f'ignoring the ionosphere correction for this frame')
+        return None
+    full[r0:r1, c0:c1] = corr[r0 - rowOff:r1 - rowOff, c0 - colOff:c1 - colOff]
+    u.mywarning(f'readIonCorrection: {os.path.basename(ionVrt)} covers rows {r0}-{r1 - 1} '
+                f'of {full.shape[0]} (a constituent frame has no ionosphere estimate); '
+                f'uncovered rows get zero correction')
+    return full
 
 
 def writeGoodMask(templateVrt, goodArray, outTif):
@@ -151,7 +201,7 @@ def evaluateFrame(frameDir, trackDir='.', sigThresh=3.0, framePattern='00??'):
     '''
     orbit, frameNum = (int(x) for x in os.path.basename(frameDir).split('_'))
     velStatsDir = os.path.join(trackDir, 'velocityStats',
-                               findVelStatsDir(frameNum, framePattern))
+                               findVelStatsDir(frameNum, framePattern, trackDir))
 
     rangeVrt = os.path.join(frameDir, 'range.offsets.vrt')
     azVrt = os.path.join(frameDir, 'azimuth.offsets.vrt')
@@ -205,20 +255,43 @@ def evaluateFrame(frameDir, trackDir='.', sigThresh=3.0, framePattern='00??'):
     # Greenland regardless of the actual project (see resolveRegionDef()).
     regionDef = resolveRegionDef(trackDir)
     epsg, wktFile = regionDef.epsg(), regionDef.wktFile()
-    mean = u.geoimage(geoType='velocityRA', verbose=False)
-    mean.readData(os.path.join(velStatsDir, 'velocity'), tiff=True, epsg=epsg, wktFile=wktFile)
-    mean.setupInterp()
-    sigma = u.geoimage(geoType='errorRA', verbose=False)
-    sigma.readData(os.path.join(velStatsDir, 'velocity'), tiff=True, epsg=epsg, wktFile=wktFile)
-    sigma.setupInterp()
-    navg = u.geoimage(geoType='scalar', verbose=False)
-    navg.readData(os.path.join(velStatsDir, 'velocity.navg'), tiff=True, epsg=epsg, wktFile=wktFile)
-    navg.setupInterp()
-
-    xps, yps = mean.geo.lltoxykm(ll.lat, ll.lon)
-    vr, va, _ = mean.interpGeo(xps, yps)
-    er, ea, _ = sigma.interpGeo(xps, yps)
-    nAvgInterp = navg.interpGeo(xps, yps)
+    statsBase = os.path.join(velStatsDir, 'velocity')
+    # Read only the window of the composite this frame touches (a track-wide
+    # composite can be hundreds of Mpx; the frame needs a few percent of it),
+    # and tolerate a missing composite (no products yet in this range) by
+    # falling back to the reference-only blend below (wData = 0 everywhere)
+    # instead of dying in readgeodat -- that failure used to drop every frame
+    # of a new range from the master until someone rebuilt the stats.
+    vr = va = er = ea = nAvgInterp = None
+    if os.path.exists(statsBase + '.vr.tif'):
+        probe = u.geoimage(geoType='velocityRA', verbose=False)
+        probe.getGeoFile(statsBase, probe.getDomain(epsg), tiff=True,
+                         wkt=probe.getWKT_PROJ(epsg, wktFile))
+        xps, yps = probe.geo.lltoxykm(ll.lat, ll.lon)
+        box = (np.nanmin(xps), np.nanmax(xps), np.nanmin(yps), np.nanmax(yps))
+        mean = u.geoimage(geoType='velocityRA', verbose=False)
+        sigma = u.geoimage(geoType='errorRA', verbose=False)
+        navg = u.geoimage(geoType='scalar', verbose=False)
+        if (mean.readDataWindow(statsBase, *box, tiff=True, epsg=epsg, wktFile=wktFile) is not None
+                and sigma.readDataWindow(statsBase, *box, tiff=True, epsg=epsg, wktFile=wktFile) is not None
+                and navg.readDataWindow(statsBase + '.navg', *box, tiff=True, epsg=epsg, wktFile=wktFile) is not None):
+            mean.setupInterp()
+            sigma.setupInterp()
+            navg.setupInterp()
+            xps, yps = mean.geo.lltoxykm(ll.lat, ll.lon)
+            vr, va, _ = mean.interpGeo(xps, yps)
+            er, ea, _ = sigma.interpGeo(xps, yps)
+            nAvgInterp = navg.interpGeo(xps, yps)
+        else:
+            u.mywarning(f'autocleanNISAR: {frameDir} does not overlap the velocityStats '
+                        f'composite in {velStatsDir} -- reference-only mask')
+    else:
+        u.mywarning(f'autocleanNISAR: no velocity composite in {velStatsDir} '
+                    f'(velocityStats not run yet for this range?) -- reference-only mask')
+    if vr is None:
+        shape = ll.lat.shape
+        vr, va, er, ea = (np.full(shape, np.nan) for _ in range(4))
+        nAvgInterp = np.zeros(shape)
 
     nAvgSafe = np.nan_to_num(nAvgInterp, nan=0.)
     vrSafe = np.nan_to_num(vr, nan=0.)
@@ -330,6 +403,16 @@ def _evaluateFrameThread(frameDir, trackDir, sigThresh, framePattern, results):
                              goodA.size - int(np.sum(goodA)), goodR.size,
                              biasR, biasA)
     except (Exception, SystemExit) as e:
+        # str(SystemExit(1)) is just "1": u.myerror() prints the real message to stdout
+        # and exits, so the reason is lost by the time it reaches the summary. stdout
+        # cannot be captured per frame here -- redirect_stdout rebinds the process-wide
+        # sys.stdout, which would corrupt every other thread in the pool -- but the
+        # traceback is thread-local, so record where it came from instead. Enough to
+        # tell a missing-input failure from a genuine computation error.
+        stack = traceback.extract_tb(e.__traceback__)
+        e._acDetail = f'{type(e).__name__}: {e}   at ' + ' <- '.join(
+            f'{os.path.basename(fr.filename)}:{fr.lineno} {fr.line}'
+            for fr in reversed(stack[-3:]) if fr.line)
         results[frameDir] = e
 
 
@@ -346,8 +429,9 @@ def writeTrackSummary(trackDir, frameDirs, results, sigThresh):
         label = os.path.basename(frameDir)
         result = results.get(frameDir)
         if not isinstance(result, tuple):
-            print(f'{label}: FAILED ({result})')
-            frameSummaries[label] = {'failed': str(result)}
+            detail = getattr(result, '_acDetail', None) or str(result)
+            print(f'{label}: FAILED ({detail})')
+            frameSummaries[label] = {'failed': str(detail)}
             nFailed += 1
         else:
             nBadR, nBadA, total, biasR, biasA = result
@@ -430,6 +514,29 @@ def evaluateAllTracks(trackDirs, sigThresh=3.0, framePattern='00??', nThreads=8,
     results = {}
     allThreads = []
     trackFrames = {}
+    summarised = set()
+    summaryLock = threading.Lock()
+
+    def frameThenMaybeSummary(frameDir, trackDir, sigThresh, framePattern, results):
+        '''Run one frame, then write its track's summary the moment that frame is the
+        last of the track to finish. Writing per track as it completes -- rather than
+        only after the whole pool joins -- means a run that is killed part-way still
+        leaves the diagnostics for every track it got through. Without this, an
+        interrupted run loses the reason every frame failed, which is exactly what
+        happened nightly on Antarctica40. The pool itself keeps its no-barrier
+        behaviour: nothing waits for a track, the summary is just written by whichever
+        thread happens to close it out.'''
+        try:
+            _evaluateFrameThread(frameDir, trackDir, sigThresh, framePattern, results)
+        finally:
+            with summaryLock:
+                frames = trackFrames.get(trackDir, [])
+                if trackDir in summarised or any(f not in results for f in frames):
+                    return
+                summarised.add(trackDir)
+            print(f'--- {trackDir} ---')
+            writeTrackSummary(trackDir, frames, results, sigThresh)
+
     for trackDir in trackDirs:
         allFrameDirs = findFrameDirs(trackDir, framePattern)
         if len(allFrameDirs) < 1:
@@ -439,7 +546,7 @@ def evaluateAllTracks(trackDirs, sigThresh=3.0, framePattern='00??', nThreads=8,
         if len(frameDirs) < 1:
             continue
         trackFrames[trackDir] = frameDirs
-        allThreads += [threading.Thread(target=_evaluateFrameThread,
+        allThreads += [threading.Thread(target=frameThenMaybeSummary,
                                         args=[frameDir, trackDir, sigThresh,
                                               framePattern, results])
                        for frameDir in frameDirs]
@@ -450,7 +557,11 @@ def evaluateAllTracks(trackDirs, sigThresh=3.0, framePattern='00??', nThreads=8,
           f'{len(trackFrames)} tracks, {nThreads} threads')
     u.runMyThreads(allThreads, nThreads, 'autocleanNISAR')
 
+    # Anything not already summarised above -- a track whose last frame died in a way
+    # that skipped the finally block, so its summary was never triggered.
     for trackDir, frameDirs in trackFrames.items():
+        if trackDir in summarised:
+            continue
         print(f'--- {trackDir} ---')
         writeTrackSummary(trackDir, frameDirs, results, sigThresh)
     return results

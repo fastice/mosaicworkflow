@@ -6,7 +6,8 @@ Created on Thu Feb  1 10:14:50 2024
 @author: ian
 """
 
-__all__ = ['grepdate',
+__all__ = ['checkvelsize',
+           'grepdate',
            'makemosaic',
            'makevelnoclean',
            'mergeoff',

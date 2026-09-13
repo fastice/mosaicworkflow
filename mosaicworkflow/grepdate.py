@@ -27,7 +27,7 @@ def getSensor(sensor):
         elif 'Sentinel' in os.getcwd():
             sensor = 'S1'
         elif 'NISAR' in os.getcwd():
-            sensor = 'NISARTest'
+            u.myerror('NISAR track directory - use grepnisar instead')
         else:
             print('\n**** Could not determine sensor ****\n')
             exit()
@@ -173,13 +173,34 @@ def slcStatus(firstImage):
     return '-'
 
 
+def offsetsExist(root):
+    '''
+    Offsets present as either the legacy binary (root) or the tiff/vrt
+    product (root.tif/root.vrt) written by the GeoTIFF migration.
+    '''
+    for candidate in [root, f'{root}.tif', f'{root}.vrt']:
+        if os.path.exists(candidate):
+            return True
+    return False
+
+
+def velocityExists(frameDir):
+    '''
+    Velocity mosaic present in frameDir/velocity. Matches any mosaicOffsets
+    velocity product - tiff/vrt (mosaicOffsets.vrt, mosaicOffsets.vx.tif) or
+    legacy binary/geodat (mosaicOffsets.vx, mosaicOffsets.vx.geodat) - and
+    covers both the xy (vx/vy) and range-azimuth (vr/va/vz) namings.
+    '''
+    return len(glob.glob(f'{frameDir}/velocity/mosaicOffsets.v*')) > 0
+
+
 def processingStatus(firstImage):
-    if os.path.exists(f'{firstImage["dir"]}/azimuth.offsets'):
+    if offsetsExist(f'{firstImage["dir"]}/azimuth.offsets'):
         thumbs = '-'
-        if os.path.exists(f'{firstImage["dir"]}/velocity'):
+        if velocityExists(firstImage["dir"]):
             thumbs = 'v'
         fast = '.'
-        if os.path.exists(f'{firstImage["dir"]}/fast/azimuth.offsets.fast'):
+        if offsetsExist(f'{firstImage["dir"]}/fast/azimuth.offsets.fast'):
             fast = 'f'
         return f'x{fast}{thumbs}'
     elif os.path.exists(f'{firstImage["dir"]}/runboth'):

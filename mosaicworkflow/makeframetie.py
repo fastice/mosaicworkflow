@@ -167,6 +167,11 @@ def main():
              '(tie_script --yaml), which is now the standard for this workflow.'
     )
     parser.add_argument(
+        '--useAzIonosphere', action='store_true',
+        help='Pass --useAzIonosphere to tie_script (azparams fits with and without '
+             'the azimuth ionosphere correction and mosaic3d applies the winner); '
+             'default off, which gives azparams -noIonosphere')
+    parser.add_argument(
         '--useSquint', action='store_true',
         help='Pass --useSquint to tie_script (squint heading correction in mosaic3d '
              'and tiepoints -motion)'
@@ -183,6 +188,7 @@ def main():
     keepVzFlag = ' --keepVz' if args.keepVz else ''
     yamlFlag = '' if args.noYaml else ' --yaml'
     squintFlag = ' --useSquint' if args.useSquint else ''
+    azIonFlag = ' --useAzIonosphere' if args.useAzIonosphere else ''
     tiffFlag = ' --tiff' if args.tiff else ''
 
     headers = ['extraties', 'DEM', 'track_root', 'base_nlooks',
@@ -319,7 +325,7 @@ def main():
             fin.close()
             fout.close()
             #
-            call('tie_script' + squintFlag + yamlFlag + '  ' + tiefile, shell=True)
+            call('tie_script' + squintFlag + azIonFlag + yamlFlag + '  ' + tiefile, shell=True)
             call('vel_thumbs' + overWriteFlag + keepVzFlag + tiffFlag + ' ' + thumbfile, shell=True)
         else:
             u.myalert('No data for ' + tiefile)

@@ -55,7 +55,7 @@ def updateDateDBArgs():
     parser = argparse.ArgumentParser(
         description='\033[1mUpdate the date database that maps orbit-frame '
                     'product directories to acquisition dates.\033[0m',
-        epilog='Run from the datesDB/ directory inside the project root.',
+        epilog='Run from the datesDB/ directory inside the project root. Part of the mosaicworkflow package.',
         allow_abbrev=False)
     parser.add_argument('--DBname', type=str, default='dateDataBase',
                         help='Filename for the date database [dateDataBase]')

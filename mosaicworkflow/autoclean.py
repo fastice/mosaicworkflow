@@ -85,6 +85,7 @@ def getVelocityStatsMode():
 def autocleanProcessArgs():
     """Parse command-line arguments and return processing parameters."""
     parser = argparse.ArgumentParser(
+        epilog='Part of the mosaicworkflow package.',
         description='Flag outlier offsets by comparison with velocityStats '
                     'reference.  Run from the track-N/ directory.')
     parser.add_argument('-nocull', '--nocull', action='store_true',
@@ -201,7 +202,7 @@ def getVelRef(noCull, epsg, wktFile, framePrefix='', doRA=False):
 
 def getOffsetDirs(noCull, offDirRoot):
     """Return offset dirs that have azimuth.offsets and no Exclude file."""
-    offs = sorted(glob.glob(f'{offDirRoot}/azimuth.offsets'))
+    offs = u.globOffsetProducts(f'{offDirRoot}/azimuth.offsets')
     if len(offs) < 1:
         u.myerror('no *_*/azimuth.offsets: in track-XXX dir?')
     velFile = ['velocity', 'velocity_nocull'][noCull]
@@ -400,7 +401,7 @@ def computeBadRA(mask1, vel, geodatFile, dem, offDir):
 
 def makeRAMask(offDir, r, a):
     """Build a dilated range/azimuth index mask from bad-point coordinates."""
-    fileroot = sorted(glob.glob(f'{offDir}/*.interp.da'))
+    fileroot = u.globOffsetProducts(f'{offDir}/*.interp.da')
     if len(fileroot) < 1:
         u.myerror(f'offDir = {offDir} missing offset files')
     fileroot = fileroot[0]

@@ -3,6 +3,7 @@ import argparse
 import utilities as u
 import numpy as np
 import os
+import glob
 import re
 import shapefile
 import sarfunc as s
@@ -33,6 +34,58 @@ def getVelocityStatsMode():
     return 'XY'
 
 
+def getSecondaryVelDirs(secondaryRoots=None):
+    """Return the secondary track dirs whose <orbit>_<frame>/velocity frames
+    should be aggregated into this (prime) track's velocityStats.
+
+    Run from a prime track-N/velocityStats/ directory. When secondaryRoots is
+    None the list of secondary project roots is read from the prime project.yaml
+    (secondaryDirectories key, ../../ or ../../../); an explicit list overrides
+    it. Bare names resolve against the parent of the prime project dir (matching
+    cloneSLCdir.py); absolute/contains-slash entries are used as given. The
+    current track basename is appended to each root, and only existing dirs are
+    returned. Empty when the key is absent, so the behaviour is unchanged for
+    projects (and NISAR tracks) that do not set it."""
+    primeRoot = None
+    if secondaryRoots is None:
+        secondaryRoots = []
+        for levels in ('../../project.yaml', '../../../project.yaml'):
+            yamlPath = os.path.join(os.getcwd(), levels)
+            if os.path.exists(yamlPath):
+                try:
+                    import yaml
+                    with open(yamlPath) as fp:
+                        proj = yaml.safe_load(fp) or {}
+                    entries = proj.get('secondaryDirectories') or []
+                    if isinstance(entries, str):
+                        entries = [entries]
+                    secondaryRoots = list(entries)
+                    primeRoot = os.path.dirname(os.path.abspath(yamlPath))
+                except Exception:
+                    pass
+                break
+
+    if not secondaryRoots:
+        return []
+
+    # parent of the prime project dir, used to resolve bare secondary names
+    if primeRoot is None:
+        primeRoot = os.path.abspath('../..')
+    parentOfPrime = os.path.dirname(primeRoot)
+    track = os.path.basename(os.path.abspath('..'))
+
+    secDirs = []
+    for entry in secondaryRoots:
+        root = entry if (os.path.isabs(entry) or '/' in entry) \
+            else os.path.join(parentOfPrime, entry)
+        secTrackDir = os.path.join(os.path.abspath(root), track)
+        if os.path.isdir(secTrackDir):
+            secDirs.append(secTrackDir)
+        else:
+            u.mywarning(f'secondaryDirectory track dir not found: {secTrackDir}')
+    return secDirs
+
+
 def velocityStatsProcessArgs():
     """Parse command-line arguments and return processing parameters."""
     parser = argparse.ArgumentParser(
@@ -57,6 +110,11 @@ def velocityStatsProcessArgs():
     parser.add_argument('-initializeReference', '--initializeReference',
                         action='store_true',
                         help='(Re)build sims/mosaicOffsets.vr basemap')
+    parser.add_argument('-secondaryDirs', '--secondaryDirs', nargs='+',
+                        default=None, metavar='ROOT',
+                        help='Secondary project roots whose <track>/<frame>/velocity '
+                             'frames are aggregated in too [read from project.yaml '
+                             'secondaryDirectories]')
     args = parser.parse_args()
     # resolve doRA: explicit flags override yaml
     if args.doXY:
@@ -66,7 +124,7 @@ def velocityStatsProcessArgs():
     else:
         doRA = (getVelocityStatsMode() == 'RA')
     return (args.nocull, args.velmap, args.sumVz, args.region, args.regionFile, doRA,
-            args.initializeReference)
+            args.initializeReference, args.secondaryDirs)
 
 
 def detectFileFormat(basePath, doRA=False):
@@ -102,17 +160,21 @@ def getRABasemap(frameDir):
 
 
 def parseVelFilePath(velFile):
-    ''' parse vel file path to get orbit frame'''
-    d = velFile.split("/")[1]
+    ''' parse vel file path to get orbit frame. Uses the frame dir (the parent of
+    the velocity dir) rather than a fixed path index so it works for both the
+    relative prime inputs (../<orbit>_<frame>/velocity) and absolute secondary
+    inputs (/abs/.../track-N/<orbit>_<frame>/velocity). '''
+    frameDir = os.path.dirname(velFile)
+    d = os.path.basename(frameDir)
     try:
         orbit, frame = (int(s) for s in d.split('_'))
     except Exception:
         orbit, frame = -1, 1
         u.mywarning(f'Could no parse velFile: {velFile}')
-    if os.path.exists('../'+d+'/Exclude'):
+    if os.path.exists(os.path.join(frameDir, 'Exclude')):
         u.mywarning(f'Skipping {velFile} because Exclude file found')
         frame = -1
-    elif os.path.exists('../'+d+'/Exclude.pending'):
+    elif os.path.exists(os.path.join(frameDir, 'Exclude.pending')):
         # Soft exclude: keep the frame. Its velocity map is a blank (all
         # no-data) mosaic -- tieScript keeps no-solution segs in the input file
         # and mosaic3d's sigma<0 skip gates contribute nothing -- so it adds
@@ -222,7 +284,7 @@ def sumStats(vel, mux, muy, varx, vary, numAvg, iGood, doRA=False):
 
 
 def normStats(velBase, numAvg, mux, muy, varx, vary, froot, velFileSave,
-              sigMask, doRA=False):
+              sigMask, doRA=False, writeRaw=True):
     ''' compute normed stats '''
     cfg1, cfg2 = ('vr', 'va') if doRA else ('vx', 'vy')
     rawSfx1 = '.raw.vr' if doRA else '.raw.vx'
@@ -234,10 +296,11 @@ def normStats(velBase, numAvg, mux, muy, varx, vary, froot, velFileSave,
     mux[iSomeData] /= numAvg[iSomeData]
     muy[iSomeData] /= numAvg[iSomeData]
 
-    u.writeImage(froot + rawSfx1, mux, '>f4')
-    u.writeImage(froot + rawSfx2, muy, '>f4')
+    if writeRaw:
+        u.writeImage(froot + rawSfx1, mux, '>f4')
+        u.writeImage(froot + rawSfx2, muy, '>f4')
     geodatSrc = 'mosaicOffsets' + ('.vr.geodat' if doRA else '.vx.geodat')
-    if os.path.exists(velFileSave + '/' + geodatSrc):
+    if writeRaw and os.path.exists(velFileSave + '/' + geodatSrc):
         copyfile(velFileSave + '/' + geodatSrc, froot + rawSfx1 + '.geodat')
         copyfile(velFileSave + '/' + geodatSrc, froot + rawSfx2 + '.geodat')
 
@@ -610,6 +673,276 @@ def velFileLoop(velFiles, frame1, frame2, frameDir, velMap, noCull, myRegion,
                  froot + '.vz.geodat')
 
 
+
+# ---------------------------------------------------------------------------
+# Track-mode ("master grid") velocity stats -- opt-in via project.yaml
+#     velocityStatsRegions: track
+# Default (key absent or 'frameBins') is the original per-frame-range behaviour
+# above, unchanged, so Greenland and every other workflow keep working.
+#
+# In track mode every frame's velocity product is produced on its own extent
+# (mosaic3d auto-size / velThumbs box) but with its origin on a common grid:
+# posting dx/dy identical, lower-left pixel-centre origins an integer number of
+# postings apart. The composite for the whole track is the union bounding box of
+# the member products; each product is placed at its pixel offset and the same
+# two-pass pixel-wise statistics (findKeepers/sumStats/normStats) run over
+# horizontal strips of the union grid so memory is bounded regardless of track
+# size. Output files, names and no-data values are exactly those writeStats()
+# produces, so autocleanNISAR reads them unchanged.
+# ---------------------------------------------------------------------------
+
+TRACK_STRIP_PIXELS = 8_000_000    # max pixels per strip (~3-4 GB peak per track)
+TRACK_ALIGN_TOL = 1.0e-3          # fraction of a posting; alignment tolerance
+
+
+def getVelocityStatsRegions():
+    """Read velocityStatsRegions from ../../project.yaml (or ../../../):
+    'track' (one composite per track on the master grid) or 'frameBins' (the
+    original per-frame-number-range behaviour). Missing key -> 'frameBins'."""
+    for levels in ('../../project.yaml', '../../../project.yaml'):
+        yamlPath = os.path.join(os.getcwd(), levels)
+        if os.path.exists(yamlPath):
+            try:
+                import yaml
+                with open(yamlPath) as fp:
+                    proj = yaml.safe_load(fp) or {}
+                mode = str(proj.get('velocityStatsRegions', 'frameBins'))
+                if mode.lower() == 'track':
+                    return 'track'
+                return 'frameBins'
+            except Exception:
+                pass
+    return 'frameBins'
+
+
+class _Comp:
+    """Minimal attribute bag standing in for a geoimage inside findKeepers /
+    sumStats (they only touch .vr/.va/.v or .er/.ea)."""
+    pass
+
+
+def _productGrid(velDir, domain):
+    """Geodat of a frame's velocity product (mosaicOffsets.vr.tif) or None."""
+    tif = os.path.join(velDir, 'mosaicOffsets.vr.tif')
+    if not os.path.exists(tif):
+        return None
+    g = u.geodat(domain=domain, verbose=False)
+    g.readGeodatFromTiff(tif)
+    return g
+
+
+def _readWindowBottomUp(tif, col0, nCols, rowBU0, nRows, ysProduct):
+    """Read nRows x nCols from a product tif, rows given bottom-up (geoimage
+    convention), returning a bottom-up float64 array with no-data -> NaN."""
+    ds = gdal.Open(tif)
+    band = ds.GetRasterBand(1)
+    yoff = ysProduct - (rowBU0 + nRows)
+    arr = band.ReadAsArray(col0, yoff, nCols, nRows).astype(np.float64)
+    ds = None
+    arr = np.flipud(arr)
+    arr[arr <= -2.0e9] = np.nan
+    return arr
+
+
+def _createTrackTiff(path, xsU, ysU, gt, wkt, noData):
+    driver = gdal.GetDriverByName('GTiff')
+    if os.path.exists(path):
+        os.remove(path)
+    ds = driver.Create(path, xsU, ysU, 1, gdal.GDT_Float32,
+                       options=['TILED=YES', 'COMPRESS=DEFLATE', 'PREDICTOR=2',
+                                'SPARSE_OK=YES', 'BIGTIFF=IF_SAFER'])
+    ds.SetGeoTransform(gt)
+    ds.SetProjection(wkt)
+    if noData is not None:
+        ds.GetRasterBand(1).SetNoDataValue(noData)
+    return ds
+
+
+def _writeStrip(ds, arr, ysU, r0, noData):
+    """Write a bottom-up strip whose first row is union row r0."""
+    out = arr.astype('f4')
+    if noData is not None:
+        out[np.isnan(out)] = noData
+    ds.GetRasterBand(1).WriteArray(np.flipud(out), 0, ysU - (r0 + arr.shape[0]))
+
+
+def assembleTrackStats(velFiles, frame1, frame2, frameDir, velMap, noCull,
+                       myRegion, doRA=True, doVz=False):
+    """Track-mode replacement for the two velFileLoop() passes over one
+    velocityStats/<range> directory: place every member product on the union
+    master grid and accumulate the same statistics strip by strip."""
+    if not doRA:
+        u.myerror('velocityStats: track mode (velocityStatsRegions: track) is '
+                  'implemented for --doRA only')
+    if doVz:
+        u.myerror('velocityStats: track mode does not support doVz')
+    froot = [frameDir + '/velocity', frameDir + '/velocity_nocull'][noCull]
+    baseOut = frameDir + '/mosaicBaseRA'
+    epsg, wktFile = myRegion.epsg(), myRegion.wktFile()
+    domain = 'antarctica' if epsg == 3031 else 'greenland'
+    explainFile = os.path.join(frameDir, 'noVelocityFiles.txt')
+
+    # --- member products and their grids ---------------------------------
+    members = []
+    for velFile in velFiles:
+        orbit, frame = parseVelFilePath(velFile)
+        if frame < frame1 or frame > frame2:
+            continue
+        g = _productGrid(velFile, domain)
+        if g is None:
+            u.mywarning(f'velocityStats(track): no mosaicOffsets.vr.tif in '
+                        f'{velFile} -- skipping')
+            continue
+        members.append((velFile, g))
+    if not members:
+        u.mywarning(f'velocityStats(track): no velocity products for frames '
+                    f'{frame1}-{frame2} in {frameDir}')
+        with open(explainFile, 'w') as fp:
+            fp.write(f'No velocity products for frames {frame1}-{frame2}.\n')
+        return False
+    if os.path.exists(explainFile):
+        os.remove(explainFile)
+
+    # --- master grid: common posting, integer-posting offsets -------------
+    g0 = members[0][1]
+    dxKm, dyKm = g0.pixSizeInKm()
+    dxM, dyM = g0.pixSizeInM()
+    aligned = []
+    for velFile, g in members:
+        pdx, pdy = g.pixSizeInKm()
+        ox = (g.x0 - g0.x0) / dxKm
+        oy = (g.y0 - g0.y0) / dyKm
+        if (abs(pdx - dxKm) > 1e-9 or abs(pdy - dyKm) > 1e-9
+                or abs(ox - round(ox)) > TRACK_ALIGN_TOL
+                or abs(oy - round(oy)) > TRACK_ALIGN_TOL):
+            u.mywarning(f'velocityStats(track): {velFile} is NOT on the master '
+                        f'grid (origin {g.x0:.4f},{g.y0:.4f} km, posting '
+                        f'{pdx:g}x{pdy:g} km vs {g0.x0:.4f},{g0.y0:.4f} / '
+                        f'{dxKm:g}x{dyKm:g}) -- skipping; regenerate it')
+            continue
+        aligned.append((velFile, g))
+    members = aligned
+    if not members:
+        u.mywarning('velocityStats(track): no grid-aligned products')
+        return False
+    x0U = min(g.x0 for _, g in members)
+    y0U = min(g.y0 for _, g in members)
+    xMax = max(g.x0 + (g.xs - 1) * dxKm for _, g in members)
+    yMax = max(g.y0 + (g.ys - 1) * dyKm for _, g in members)
+    xsU = int(round((xMax - x0U) / dxKm)) + 1
+    ysU = int(round((yMax - y0U) / dyKm)) + 1
+    placed = []
+    for velFile, g in members:
+        col0 = int(round((g.x0 - x0U) / dxKm))
+        row0 = int(round((g.y0 - y0U) / dyKm))
+        placed.append((velFile, g, col0, row0))
+    print(f'velocityStats(track): {len(placed)} products on a {xsU} x {ysU} px '
+          f'master grid ({xsU * dxKm:.0f} x {ysU * dyKm:.0f} km), origin '
+          f'{x0U:.1f},{y0U:.1f} km, posting {dxKm:g} km')
+
+    # --- outputs ---------------------------------------------------------
+    gt = ((x0U - dxKm / 2.) * 1000., dxM, 0.,
+          (y0U - dyKm / 2. + ysU * dyKm) * 1000., 0., -dyM)
+    wkt = u.geoimage(geoType='velocityRA', verbose=False).getWKT_PROJ(epsg, wktFile)
+    outNames = {'vr': froot + '.vr.tif', 'va': froot + '.va.tif',
+                'er': froot + '.er.tif', 'ea': froot + '.ea.tif',
+                'navg': froot + '.navg.tif',
+                'bvr': baseOut + '.vr.tif', 'bva': baseOut + '.va.tif'}
+    outNoData = {'vr': -2.0e9, 'va': -2.0e9, 'er': -1.0, 'ea': -1.0,
+                 'navg': None, 'bvr': -2.0e9, 'bva': -2.0e9}
+    outDs = {k: _createTrackTiff(p, xsU, ysU, gt, wkt, outNoData[k])
+             for k, p in outNames.items()}
+
+    stripRows = max(256, int(TRACK_STRIP_PIXELS // max(xsU, 1)))
+    sigShape = myRegion.sigmaShape()
+    nStrips = (ysU + stripRows - 1) // stripRows
+    for iStrip, r0 in enumerate(range(0, ysU, stripRows)):
+        r1 = min(r0 + stripRows, ysU)
+        nRows = r1 - r0
+        shape = (nRows, xsU)
+        # reference basemap for this strip
+        velBase = u.geoimage(geoType='velocityRA', verbose=False)
+        velBase.geo = u.geodat(x0=x0U, y0=y0U + r0 * dyKm, xs=xsU, ys=nRows,
+                               dx=dxM, dy=dyM, domain=domain, verbose=False)
+        velBase.xyCoordinates()
+        xps = np.tile(velBase.xx[np.newaxis, :], (nRows, 1))
+        yps = np.tile(velBase.yy[:, np.newaxis], (1, xsU))
+        velBase.vr = np.full(shape, np.nan)
+        velBase.va = np.full(shape, np.nan)
+        if velMap is not None:
+            velBase.v = velMap.interpGeo(xps, yps)[2]
+        else:
+            velBase.v = np.full(shape, -1.0)
+        del xps, yps
+        velBase.v[np.isnan(velBase.v)] = -1.0
+        _writeStrip(outDs['bvr'], velBase.vr, ysU, r0, outNoData['bvr'])
+        _writeStrip(outDs['bva'], velBase.va, ysU, r0, outNoData['bva'])
+        velBase.v[velBase.v < 0] = 1000000
+        sigMask = makeSigMask(velBase, 1.0, sigShape)
+
+        inStrip = [(vf, g, c0, rw0) for vf, g, c0, rw0 in placed
+                   if rw0 < r1 and rw0 + g.ys > r0]
+
+        def accumulate(mean, sigma):
+            mux, muy = np.zeros(shape), np.zeros(shape)
+            varx, vary = np.zeros(shape), np.zeros(shape)
+            numAvg = np.zeros(shape)
+            for velFile, g, col0, row0 in inStrip:
+                a = max(r0, row0)                # union rows covered
+                b = min(r1, row0 + g.ys)
+                vel = _Comp()
+                vel.vr = np.full(shape, np.nan)
+                vel.va = np.full(shape, np.nan)
+                for comp in ('vr', 'va'):
+                    win = _readWindowBottomUp(
+                        os.path.join(velFile, f'mosaicOffsets.{comp}.tif'),
+                        0, g.xs, a - row0, b - a, g.ys)
+                    getattr(vel, comp)[a - r0:b - r0, col0:col0 + g.xs] = win
+                vel.v = np.sqrt(vel.vr ** 2 + vel.va ** 2)
+                iGood = findKeepers(vel, velBase, mean, sigma, sigMask, doRA=True)
+                sumStats(vel, mux, muy, varx, vary, numAvg, iGood, doRA=True)
+            return mux, muy, varx, vary, numAvg
+
+        # pass 1: cull against the reference speed only
+        mux, muy, varx, vary, numAvg = accumulate(None, None)
+        sigx, sigy = normStats(velBase, numAvg, mux, muy, varx, vary, froot,
+                               None, sigMask, doRA=True, writeRaw=False)
+        mean, sigma = _Comp(), _Comp()
+        mean.vr, mean.va = mux, muy
+        sigma.er, sigma.ea = sigx, sigy
+        # pass 2: cull against pass-1 mean/sigma (same as velFileLoop useSig)
+        mux, muy, varx, vary, numAvg = accumulate(mean, sigma)
+        sigx, sigy = normStats(velBase, numAvg, mux, muy, varx, vary, froot,
+                               None, sigMask, doRA=True, writeRaw=False)
+        _writeStrip(outDs['vr'], mux, ysU, r0, outNoData['vr'])
+        _writeStrip(outDs['va'], muy, ysU, r0, outNoData['va'])
+        _writeStrip(outDs['er'], sigx, ysU, r0, outNoData['er'])
+        _writeStrip(outDs['ea'], sigy, ysU, r0, outNoData['ea'])
+        _writeStrip(outDs['navg'], numAvg, ysU, r0, None)
+        nData = int(np.sum(numAvg > 0))
+        print(f'  strip {iStrip + 1}/{nStrips}: rows {r0}-{r1 - 1}, '
+              f'{len(inStrip)} products, {nData} px with data')
+        del mux, muy, varx, vary, numAvg, sigx, sigy, mean, sigma, velBase, sigMask
+
+    for ds in outDs.values():
+        ds.FlushCache()
+    outDs = None
+    # multiband VRTs, same convention as writeStats()/writeMosaicBase()
+    u.geoimage(geoType='velocityRA', verbose=False).writeMyVrt(froot)
+    u.geoimage(geoType='errorRA', verbose=False).writeMyVrt(
+        froot, vrtFile=froot + '.err.vrt')
+    u.geoimage(geoType='velocityRA', verbose=False).writeMyVrt(baseOut)
+    # index of the pieces on the master grid (free, no compute)
+    try:
+        vrt = gdal.BuildVRT(os.path.join(frameDir, 'products.vrt'),
+                            [os.path.join(vf, 'mosaicOffsets.vr.tif')
+                             for vf, _, _, _ in placed])
+        vrt.FlushCache(); vrt = None
+    except Exception as e:
+        u.mywarning(f'velocityStats(track): could not build products.vrt: {e}')
+    return True
+
+
 def makeSigMask(vel, sigThresh, sigShape):
     nx, ny = vel.geo.sizeInPixels()
     sigThresh2D = Image.new('F', (nx, ny), sigThresh)
@@ -646,13 +979,31 @@ def getRegion(velFiles):
 
 def main():
     """ Compute stats for a stack of velocity files """
-    noCull, velMapFile, doVz, region, regionFile, doRA, initRef = velocityStatsProcessArgs()
+    noCull, velMapFile, doVz, region, regionFile, doRA, initRef, secondaryDirs = \
+        velocityStatsProcessArgs()
 
     frameDirs = u.dols("ls -d *-*")
-    velFiles = [u.dols('ls -d ../*_*/velocity'),
-                u.dols('ls -d ../*_*/velocity_nocull')][noCull]
+    velName = 'velocity_nocull' if noCull else 'velocity'
+    velFiles = u.dols(f'ls -d ../*_*/{velName}')
     if len(velFiles) < 1:
-        u.myerror('No files found; in velocityStats directory?')
+        # Still fatal, but say where it looked and what the two likely causes are:
+        # normally this is a track's first pass (the tie stage has not produced any
+        # frame velocity dirs yet) and resolves itself on the next run.
+        u.myerror(f'No ../*_*/{velName} directories found from {os.getcwd()} -- '
+                  f'either this is not a velocityStats directory, or the track has '
+                  f'no frame velocities yet (normal on a new track\'s first pass; '
+                  f'resolves once the tie stage has run)')
+
+    # Aggregate the secondary directories' frame velocities too (e.g. the
+    # 12-day Sentinel1-S1A/-S1C clones into the prime's shared velocityStats).
+    # Prime frames stay first so velFiles[0] (used for region + grid) is a
+    # prime frame. Empty unless secondaryDirectories is set (see
+    # getSecondaryVelDirs), so unchanged for projects that don't use it.
+    for secTrackDir in getSecondaryVelDirs(secondaryDirs):
+        secFrames = sorted(glob.glob(os.path.join(secTrackDir, '*_*', velName)))
+        if secFrames:
+            print(f'Including {len(secFrames)} secondary frames from {secTrackDir}')
+            velFiles += secFrames
 
     if region is None and regionFile is None:
         region = getRegion(velFiles)
@@ -680,10 +1031,17 @@ def main():
         print(f'velMap {velMapFile}')
         velMap = getFullMap(velMapFile)
 
+    regionsMode = getVelocityStatsRegions()
+    print(f'velocityStatsRegions: {regionsMode}')
     for frameDir in frameDirs:
         frame1, frame2 = (int(x) for x in frameDir.split('-'))
         print(frame1, frame2)
 
+        if regionsMode == 'track':
+            # master-grid composite of the whole range; see assembleTrackStats()
+            assembleTrackStats(velFiles, frame1, frame2, frameDir, velMap,
+                               noCull, myRegion, doRA=doRA, doVz=doVz)
+            continue
         if velFileLoop(velFiles, frame1, frame2, frameDir, velMap, noCull,
                        myRegion, doRA=doRA) is not False:
             velFileLoop(velFiles, frame1, frame2, frameDir, velMap, noCull,

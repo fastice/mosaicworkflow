@@ -67,6 +67,12 @@ TEMPLATE_KEYS = [
          'None defers to project.yaml useSquint key; '
          'template takes precedence over project.yaml'),
     ]),
+    ('Optional, azimuth ionosphere correction (see setupquarters.resolveBooleanBaseFlag)', [
+        ('applyAzimuthIonosphereCorrection', 'False (program default)',
+         'True appends -useAzIonosphere to baseFlags, so mosaic3d applies the '
+         'azimuth ionosphere correction for frames whose azparams fit chose it; '
+         'False leaves it off; None defers to project.yaml'),
+    ]),
     ('Optional, crossing-orbit time thresholds (see setupquarters.resolveNumericBaseFlag)', [
         ('timeThresh', 'mosaic3d default (12 days)',
          'Max days between crossing-orbit offset pairs; appends -timeThresh N to baseFlags; '
@@ -74,6 +80,19 @@ TEMPLATE_KEYS = [
         ('timePhaseThresh', 'mosaic3d default (548 days)',
          'Max days between crossing-orbit phase pairs; appends -timePhaseThresh N to baseFlags; '
          'template takes precedence over project.yaml'),
+    ]),
+    ('Optional, joint crossing-orbit solvers (mosaic3d default since 2026-08-29)', [
+        ('jointMaxSigmaPhase', 'mosaic3d default (35 m/yr)',
+         'Drop crossing-PHASE pixels whose sigmaWorst*sqrt(n) exceeds this -- i.e. whose '
+         'effective per-measurement sigma is too large.  n-normalised so it does not '
+         'penalise thin coverage.  0 disables; template takes precedence over project.yaml'),
+        ('jointMaxSigmaRange', 'mosaic3d default (100 m/yr)',
+         'Same for crossing-RANGE.  Looser because offset errors are proportionally smaller '
+         'on fast ice (30 m/yr on 10 km/yr is 0.3%).  0 disables'),
+        ('legacyPairPhase', 'False (joint solver is the default)',
+         'True appends -legacyPairPhase, restoring the ORIGINAL pairwise crossing-phase solver'),
+        ('legacyPairRange', 'False (joint solver is the default)',
+         'True appends -legacyPairRange, restoring the ORIGINAL pairwise crossing-range solver'),
     ]),
 ]
 
@@ -142,8 +161,21 @@ def makemosaicArgs():
                         'skip masking, interpolation, and tif/vrt generation')
     parser.add_argument('--useSquint', action='store_true', default=False,
                         help='Pass -useSquint to mosaic3d (overrides template/project.yaml)')
+    parser.add_argument('--useAzIonosphere', action='store_true', default=False,
+                        help='Pass -useAzIonosphere to mosaic3d (overrides '
+                             'template/project.yaml applyAzimuthIonosphereCorrection)')
     parser.add_argument('--timeThresh', type=float, default=None,
                         help='Max days between crossing-orbit offset pairs (mosaic3d default 12)')
+    parser.add_argument('--jointMaxSigmaPhase', type=float, default=None,
+                        help='Reject crossing-PHASE pixels with sigmaWorst*sqrt(n) > this '
+                             '(m/yr); overrides template and project.yaml [mosaic3d default 35]')
+    parser.add_argument('--jointMaxSigmaRange', type=float, default=None,
+                        help='Same for crossing-RANGE; overrides template and project.yaml '
+                             '[mosaic3d default 100]')
+    parser.add_argument('--legacyPairPhase', action='store_true', default=False,
+                        help='Use the ORIGINAL pairwise crossing-phase solver')
+    parser.add_argument('--legacyPairRange', action='store_true', default=False,
+                        help='Use the ORIGINAL pairwise crossing-range solver')
     parser.add_argument('--timePhaseThresh', type=float, default=None,
                         help='Max days between crossing-orbit phase pairs (mosaic3d default 548)')
     parser.add_argument('--mosaicsSetupFile', type=str,
@@ -186,8 +218,13 @@ def makemosaicArgs():
               'noLandsat': args.noLandsat, 'fitType': args.LSFitType,
               'noLabel': args.noLabel, 'metaOnly': args.metaOnly,
               'useSquint': args.useSquint,
+              'useAzIonosphere': args.useAzIonosphere,
               'timeThresh': args.timeThresh,
               'timePhaseThresh': args.timePhaseThresh,
+              'jointMaxSigmaPhase': args.jointMaxSigmaPhase,
+              'jointMaxSigmaRange': args.jointMaxSigmaRange,
+              'legacyPairPhase': args.legacyPairPhase,
+              'legacyPairRange': args.legacyPairRange,
               'nThreads': args.nThreads}
     return myArgs
 
@@ -357,8 +394,9 @@ def makeCommand(firstDate, lastDate, mergedList, mosaicMaskFile, myArgs):
     #
     outputMaskArg, templateArg, lsArg, baseFlagsArg, keepFastFlag, \
         mosaicMaskArg, noReprocessFlag, noTSXFlag, noLabelFlag, \
-        metaOnlyFlag, useSquintFlag, timeThreshArg, timePhaseThreshArg, \
-        nThreadsArg = [''] * 14
+        metaOnlyFlag, useSquintFlag, useAzIonFlag, timeThreshArg, timePhaseThreshArg, \
+        jointSigPhaseArg, jointSigRangeArg, legacyPhaseFlag, legacyRangeFlag, \
+        nThreadsArg = [''] * 19
     #
     noReprocessFlag = {False: '', True: '--noReprocess'}[myArgs["noReprocess"]]
     #
@@ -395,10 +433,20 @@ def makeCommand(firstDate, lastDate, mergedList, mosaicMaskFile, myArgs):
         metaOnlyFlag = '--metaOnly '
     if myArgs.get('useSquint', False):
         useSquintFlag = '--useSquint '
+    if myArgs.get('useAzIonosphere', False):
+        useAzIonFlag = '--useAzIonosphere '
     if myArgs.get('timeThresh') is not None:
         timeThreshArg = f'--timeThresh {myArgs["timeThresh"]} '
     if myArgs.get('timePhaseThresh') is not None:
         timePhaseThreshArg = f'--timePhaseThresh {myArgs["timePhaseThresh"]} '
+    if myArgs.get('jointMaxSigmaPhase') is not None:
+        jointSigPhaseArg = f'--jointMaxSigmaPhase {myArgs["jointMaxSigmaPhase"]} '
+    if myArgs.get('jointMaxSigmaRange') is not None:
+        jointSigRangeArg = f'--jointMaxSigmaRange {myArgs["jointMaxSigmaRange"]} '
+    if myArgs.get('legacyPairPhase', False):
+        legacyPhaseFlag = '--legacyPairPhase '
+    if myArgs.get('legacyPairRange', False):
+        legacyRangeFlag = '--legacyPairRange '
     if myArgs.get('nThreads') is not None:
         nThreadsArg = f'--nThreads {myArgs["nThreads"]} '
     # TSX excluded from single sycle data
@@ -412,8 +460,11 @@ def makeCommand(firstDate, lastDate, mergedList, mosaicMaskFile, myArgs):
         f'{noReprocessFlag} {keepFastFlag} {noTSXFlag} {noLabelFlag} ' \
         f'{metaOnlyFlag}' \
         f'{useSquintFlag}' \
+        f'{useAzIonFlag}' \
         f'{timeThreshArg}' \
         f'{timePhaseThreshArg}' \
+        f'{jointSigPhaseArg}{jointSigRangeArg}' \
+        f'{legacyPhaseFlag}{legacyRangeFlag}' \
         f'{baseFlagsArg}' \
         f'{nThreadsArg}' \
         f'{outputMaskArg} '  \

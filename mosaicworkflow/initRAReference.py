@@ -360,7 +360,8 @@ def runMosaic3d(simsDir, dem):
         f'inputFile {dem} mosaicOffsets'
     )
     print(cmd)
-    call(cmd, shell=True)
+    # idle OpenBLAS pool from libgdal; see setupquarters.runSubMosaic
+    call(cmd, shell=True, env=dict(os.environ, OPENBLAS_NUM_THREADS='1'))
 
 
 # ---- top-level entry point --------------------------------------------------

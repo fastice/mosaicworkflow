@@ -162,7 +162,10 @@ def doTheMerge(offR, offF, sensorInfo):
 
 def applySECorrection(off):
     SEFile = 'offsets.SECorrection'
-    if os.path.exists(SEFile) and os.path.exists(f'{SEFile}.vrt'):
+    # raw <SEFile> in the legacy path, <SEFile>.tif with SETideOffsets --tiff;
+    # the vrt is named the same either way and is what is actually read.
+    if os.path.exists(f'{SEFile}.vrt') and \
+            (os.path.exists(SEFile) or os.path.exists(f'{SEFile}.tif')):
         print('****** Applying SE Correction******')
         correction = np.squeeze(rasterio.open(f'{SEFile}.vrt').read())
         off.rgOff[off.areValid()] -= correction[off.areValid()]

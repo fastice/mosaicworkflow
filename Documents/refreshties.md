@@ -28,6 +28,7 @@ refreshties.py [years ...] [options]
 | `--overWrite` | False | Pass `--overWrite` to `makeframetie.py` to rerun existing products. |
 | `--keepVz` | False | Pass `--keepVz` to `makeframetie.py` to retain `.vz` and `.vz.geodat` files. |
 | `--useSquint` | False | Pass `--useSquint` to `makeframetie.py` (squint heading correction in `mosaic3d` and `tiepoints -motion`). |
+| `--tiff` | False | Pass `--tiff` to `makeframetie.py`/`vel_thumbs` so velocity products are written as GeoTIFF (`mosaic3d -GTiff`) regardless of `project.yaml` `velThumbOutput`. Forces tiff on only — it never selects binary. `setupS1Tracks` passes this unconditionally. |
 
 ---
 
@@ -37,7 +38,7 @@ For each track directory in `toRun`, a thread is spawned that:
 
 1. Detects the sensor from `project.yaml` in the project root (preferred), falling back to `sensor.yaml` with a warning, then falling back to path-based detection (`TSX`, `CSK`, `Sentinel1`, `ALOS2`, `NISAR`).
 2. Unless `-velthumbsOnly`: runs `maketies.py -run [flags] [years]` inside the track directory.
-3. Unless `-tiesOnly`: changes into `tiepoints/` and runs `makeframetie.py [--overWrite] [--keepVz] tie_planYEAR[suffix]` for each year.
+3. Unless `-tiesOnly`: changes into `tiepoints/` and runs `makeframetie.py [--overWrite] [--keepVz] [--useSquint] [--tiff] tie_planYEAR[suffix]` for each year.
 
 All threads run concurrently (up to 24 at a time via `u.runMyThreads`). stdout and stderr for each track are written to `<trackdir>/stdout` and `<trackdir>/stderr`.
 

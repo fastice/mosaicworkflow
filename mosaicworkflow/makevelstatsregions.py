@@ -97,6 +97,24 @@ def writeVelThumb(frameDir, x0, y0, dx, dy, xs, ys, baseDir, dem=None):
         print(f'resolution ="', x0, y0, xs, ys, dx, dy, '"', file=fT)
 
 
+def _reportTrackModeAlignment():
+    """Track mode: list each product's grid origin/posting and flag any that is
+    not on an integer-km origin (the master-grid contract)."""
+    velFiles = u.dols('ls -d *_*/velocity')
+    nBad = 0
+    for velFile in velFiles:
+        b = _boundsFromVelDir(velFile)
+        if b is None:
+            continue
+        x1, y1, x2, y2, dx, dy = b
+        offGrid = abs(x1 - round(x1)) > 1e-6 or abs(y1 - round(y1)) > 1e-6
+        nBad += offGrid
+        print(f'{velFile}: origin {x1:.3f} {y1:.3f} km, {x2 - x1:.1f} x {y2 - y1:.1f} km, '
+              f'posting {dx:g} {dy:g} km{"  <-- NOT on integer-km origin" if offGrid else ""}')
+    print(f'velocityStatsRegions: track -- {len(velFiles)} products, {nBad} off-grid; '
+          f'vel_thumb_header resolution lines left untouched')
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Find common geographic regions for velocityStats and write '
@@ -116,6 +134,7 @@ def main():
     # Locate project.yaml one level up from the track directory
     projectDir = os.path.dirname(os.getcwd())
     framePattern = '*'
+    regionsMode = 'frameBins'
     for yamlName in ('project.yaml', 'sensor.yaml'):
         yamlPath = os.path.join(projectDir, yamlName)
         if os.path.isfile(yamlPath):
@@ -125,6 +144,7 @@ def main():
             with open(yamlPath) as f:
                 sensorData = yaml.safe_load(f)
             framePattern = sensorData.get('framePattern', '*')
+            regionsMode = str(sensorData.get('velocityStatsRegions', 'frameBins')).lower()
             if dem is None:
                 regionPath = sensorData.get('regionFile') or sensorData.get('region')
                 if regionPath:
@@ -138,6 +158,15 @@ def main():
             break
 
     framePrefix = framePattern.split('?')[0] if '?' in framePattern else ''
+
+    if regionsMode == 'track':
+        # Master-grid mode (project.yaml velocityStatsRegions: track): there is no
+        # common box to compute -- every product is built on its own extent with
+        # its origin on the master grid (velThumbs), and velocityStats assembles
+        # them. Never rewrite the header's resolution line here (that is exactly
+        # what froze the boxes); just report alignment and leave.
+        _reportTrackModeAlignment()
+        return
 
     velFiles = u.dols('ls -d *_*/velocity')
     frameDirs = u.dols('ls -d velocityStats/*-*')

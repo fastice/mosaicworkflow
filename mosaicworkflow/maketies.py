@@ -277,10 +277,13 @@ def main():
         print(tie_planOld)
         if os.path.isfile(tie_plan1):
             os.rename(tie_plan1, tie_planOld)
-        os.rename(tie_plan, tie_plan1)
-        # only add entries for cases where there were images
+        # only keep the plan, and add a run entry, where there were images;
+        # a data-free year would just leave an empty stub in tie_dir
         if nImages > 0:
+            os.rename(tie_plan, tie_plan1)
             print('# '+str(year)+'\ntie_script ' + tie_plan + tieScriptFlags, file=fRun)
+        else:
+            os.remove(tie_plan)
     #
     # make tie_planAll
     #

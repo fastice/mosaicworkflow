@@ -53,7 +53,8 @@ def cleanoffmergeArgs():
         description='\033[1mMerge fast offsets with regular offsets and then '
         'apply badoffsets_poly.idl, badoffset_auto.idl, and '
         'badoffsets_auto.float\033[0m',
-        epilog='Notes: Ususally called as part of cleanoff process ')
+        epilog='Notes: Ususally called as part of cleanoff process. '
+        'Part of the mosaicworkflow package.')
     parser.add_argument('--sensor', type=str, default='S1',
                         help='Sensor (CSK,S1, TSX)')
     parser.add_argument('--tiff', action='store_true', default=False,
@@ -241,7 +242,10 @@ def main():
     # ***** MERGE FAST AND SLOW
     # Save copies of slow offsets and merge with fast
     # assumes the azimuth/range just created
-    if os.path.exists('fast/azimuth.offsets.noclean.fast'):
+    # processfast --tiff writes <name>.tif and no raw file, so testing only the
+    # raw name silently skips the merge and drops the fast offsets entirely.
+    if os.path.exists('fast/azimuth.offsets.noclean.fast') or \
+            os.path.exists('fast/azimuth.offsets.noclean.fast.tif'):
         if not os.path.exists('azimuth.offsets.slow') \
                 and not os.path.exists('azimuth.offsets.slow.tif'):
             u.myerror('no slow offsets')

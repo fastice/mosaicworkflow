@@ -495,9 +495,26 @@ def getPrefix(imageDir, phaseTies):
     return prefix, noUse
 
 
+def phaseYamlFlag():
+    ''' True if ../project.yaml (the project root, one level above the track dir
+    that setuptopstie runs in) opts into yaml flat-earth phase ties via
+    `phaseYaml: true`. Lets non-NISAR sensors (e.g. the ISCE-derived Sentinel1
+    phase workflow) use the yaml tie codes; legacy S1 (no flag) stays on
+    pps/pn. '''
+    projectYaml = os.path.abspath(os.path.join(os.getcwd(), '..', 'project.yaml'))
+    if os.path.isfile(projectYaml):
+        try:
+            with open(projectYaml) as f:
+                data = yaml.safe_load(f) or {}
+            return bool(data.get('phaseYaml', False))
+        except Exception:
+            return False
+    return False
+
+
 def tieCodes(phaseTies, track, sensor=''):
     ''' codes for phase and offsets'''
-    if phaseTies and 'NISAR' in sensor:
+    if phaseTies and ('NISAR' in sensor or phaseYamlFlag()):
         # yaml flat-earth mode: tiepoints -yaml, phase + offsets, no changeflat
         myCodes = {'usePre': 'pys', 'useSuf': '', 'tiePre': 'py',
                    'tieSuf': '', 'track': f' {track} '}

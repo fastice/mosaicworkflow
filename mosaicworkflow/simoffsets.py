@@ -3,6 +3,8 @@ import utilities as u
 import numpy as np
 import sys
 import os
+import shutil
+import tempfile
 from subprocess import call
 from utilities import geodatrxa
 import sarfunc as s
@@ -11,11 +13,11 @@ import glob
 from osgeo import gdal
 
 
-def _writeArrayAsTiff(filename, data, noDataValue=-2.e9):
+def _writeArrayAsTiff(filename, data, noDataValue=-2.e9, compress=True):
     """Write float32 numpy array to GeoTIFF with pixel-coord geotransform."""
     driver = gdal.GetDriverByName('GTiff')
     ds = driver.Create(filename, data.shape[1], data.shape[0], 1, gdal.GDT_Float32,
-                       options=['COMPRESS=DEFLATE'])
+                       options=['COMPRESS=DEFLATE'] if compress else [])
     ds.SetGeoTransform([-0.5, 1., 0., -0.5, 0., 1.])
     band = ds.GetRasterBand(1)
     band.WriteArray(data.astype(np.float32))
@@ -47,6 +49,43 @@ def _maskedBoxMean(arr, valid, size):
     den = uniform_filter(validF, size=size, mode='constant', cval=0.0)
     with np.errstate(invalid='ignore', divide='ignore'):
         return np.where(den > 0, num / den, arr)
+
+
+def computeSmoothRadiusMapC(dr, da, toleranceDr, toleranceDa, maxRadiusR, maxRadiusA,
+                            nIter, threads, outputTif):
+    """
+    Same map as computeSmoothRadiusMap(), computed by the smoothradius binary
+    (mosaicSource/smoothRadius) instead of in Python. The sweep is ~7x faster serially and
+    the independent radii run in parallel, which matters because this step dominated the
+    ROFF stage (~873 s of a ~884 s frame at maxRadius 50).
+
+    The binary reads and writes rasters, so dr/da/tolerances go out to a scratch directory
+    (TMPDIR, i.e. local disk -- not the frame directory, which is usually NFS) and the
+    resulting <base>.smr.tif is moved into place as outputTif.
+
+    Returns True if the binary produced the map; False if it is missing or failed, so the
+    caller can fall back to the Python and still finish the product.
+    """
+    tmpDir = tempfile.mkdtemp(prefix='smr.')
+    try:
+        for arr, name in ((dr, 'dr'), (da, 'da'),
+                          (toleranceDr, 'tolDr'), (toleranceDa, 'tolDa')):
+            _writeArrayAsTiff(f'{tmpDir}/{name}.tif', np.asarray(arr, dtype=np.float32),
+                              compress=False)
+        command = f'smoothradius -maxRadiusR {maxRadiusR} -maxRadiusA {maxRadiusA} ' \
+            f'-nIter {nIter} -ompThreads {threads} ' \
+            f'{tmpDir}/dr.tif {tmpDir}/da.tif {tmpDir}/tolDr.tif {tmpDir}/tolDa.tif ' \
+            f'{tmpDir}/out'
+        print(command)
+        status = call(command, shell=True)
+        if status != 0 or not os.path.exists(f'{tmpDir}/out.smr.tif'):
+            print(f'WARNING: smoothradius failed (status {status}); falling back to the '
+                  'Python smoothing-radius sweep, which is far slower')
+            return False
+        shutil.move(f'{tmpDir}/out.smr.tif', outputTif)
+        return True
+    finally:
+        shutil.rmtree(tmpDir, ignore_errors=True)
 
 
 def computeSmoothRadiusMap(dr, da, toleranceDr, toleranceDa, maxRadius, nIter):
@@ -164,7 +203,8 @@ def simOffsetsProcessArgs1():
         'geodat 3) produces the following: offsets.da(.da.dat, .dr, ' \
         '.dr.dat, .dat, .lat, .lon, .mask, .simdat) ' \
         '\nPart of the mosaicworkflow package.'
-    parser = argparse.ArgumentParser(description='\033[1m\n Use a velocity map'
+    parser = argparse.ArgumentParser(
+        description='\033[1m\n Use a velocity map'
                                      ' to simulate offsets for initial guess'
                                      ' in feature tracking\033[0m\n',
                                      epilog=epilog)
@@ -249,6 +289,15 @@ def simOffsetsProcessArgs1():
     parser.add_argument('--maxSmoothRadius', type=int, default=50,
                         help='Variable smoothing-radius map: sweep cap in single-look '
                         'pixels, clamped to <= 255 (byte output) [50]')
+    parser.add_argument('--maxSmoothRadiusA', type=int, default=None,
+                        help='Variable smoothing-radius map: azimuth sweep cap, if it is '
+                        'to differ from the range cap --maxSmoothRadius. Offsets grids are '
+                        'resampled to square pixels, so the default (same as '
+                        '--maxSmoothRadius, an isotropic sweep) is normally right [None]')
+    parser.add_argument('--smoothThreads', type=int, default=2,
+                        help='Variable smoothing-radius map: threads for the smoothradius '
+                        'binary. Memory is ~0.9 GB + 0.3 GB per thread on a 13 Mpixel '
+                        'grid [2]')
     parser.add_argument('--smoothNIter', type=int, default=3,
                         help='Variable smoothing-radius map: repeated box-filter passes '
                         'per sweep step (Gaussian-ish) [3]')
@@ -260,10 +309,13 @@ def simOffsetsProcessArgs1():
                   args.maxTol is not None]
     if any(smoothFlags) and not all(smoothFlags):
         u.myerror('simoffsets: --minTol/--percentSpeed/--maxTol must be given together')
-    if args.maxSmoothRadius > 255:
-        print(f'WARNING: --maxSmoothRadius {args.maxSmoothRadius} exceeds byte range, '
-              'clamping to 255')
-        args.maxSmoothRadius = 255
+    if args.maxSmoothRadiusA is None:
+        args.maxSmoothRadiusA = args.maxSmoothRadius
+    for radiusArg in ['maxSmoothRadius', 'maxSmoothRadiusA']:
+        if getattr(args, radiusArg) > 255:
+            print(f'WARNING: --{radiusArg} {getattr(args, radiusArg)} exceeds byte range, '
+                  'clamping to 255')
+            setattr(args, radiusArg, 255)
     #
     byteOrder = {True: 'LSB', False: 'MSB'}[args.LSB]
     #
@@ -286,7 +338,8 @@ def simOffsetsProcessArgs1():
         secondGeodatFile, args.syncDat, args.fastMask, not args.noVel, \
         byteOrder, args.ompThreads, args.iceRockWaterMask, args.iceMask, args.tiff, \
         args.verticalCorrection, fp, failFile, args.minTol, args.percentSpeed, \
-        args.maxTol, args.maxSmoothRadius, args.smoothNIter
+        args.maxTol, args.maxSmoothRadius, args.maxSmoothRadiusA, \
+        args.smoothThreads, args.smoothNIter
 
 
 def resolveRegion(args):
@@ -743,7 +796,7 @@ def main():
     azOffsets, offsetsDat, myRegion, geodatFile, secondGeoDatFile, syncDat, \
         fastMask, useVel, byteOrder, ompThreads, iceRockWaterMask, iceMask, tiff, \
         verticalCorrection, fp, failFile, minTol, percentSpeed, maxTol, \
-        maxSmoothRadius, smoothNIter = \
+        maxSmoothRadius, maxSmoothRadiusA, smoothThreads, smoothNIter = \
         simOffsetsProcessArgs1()
     #
     for key in myRegion.region:
@@ -758,7 +811,10 @@ def main():
     maskFile = offsetsDat.replace('.dat', '.mask').replace('.vrt', '.mask')
     if tiff:
         llVrt = offsetsDat.replace('.dat', '.ll.vrt').replace('.vrt', '.ll.vrt')
-        needSim = not os.path.exists(llVrt) or not os.path.exists(maskFile) \
+        # siminsar -tiff writes the mask as <root>.mask.tif + <root>.mask.vrt,
+        # so testing for the raw <root>.mask would re-run the sim every time.
+        needSim = not os.path.exists(llVrt) \
+                  or not os.path.exists(f'{maskFile}.vrt') \
                   or not os.path.exists(offsetsDat) or syncDat
     else:
         latFile = offsetsDat.replace('.dat', '.lat').replace('.vrt', '.lat')
@@ -788,6 +844,10 @@ def main():
     offsets1 = u.offsets(fileRoot=azOffsets, latlon=latLonRoot,
                          datFile=offsetsDat, geodatrxaFile=geodatFile,
                          maskFile=maskFile, vrtFile=vrtFile)
+    if tiff:
+        # getMask() below reads maskVrtFile when set, otherwise the raw maskFile
+        # -- which siminsar -tiff no longer writes.
+        offsets1.maskVrtFile = f'{maskFile}.vrt'
     #
     secondGeodatRxA = geodatrxa(file=secondGeoDatFile, echo=False)
     # compute deltaT
@@ -845,9 +905,13 @@ def main():
         Xv = np.clip(percentSpeed / 100. * speed, minTol, maxTol)  # m/yr
         toleranceDr = Xv * groundToSlant * deltaT / 365.  # slant-range pixels
         toleranceDa = Xv * deltaT / 365. / slpA  # azimuth pixels
-        radius = computeSmoothRadiusMap(dr, da, toleranceDr, toleranceDa,
-                                        maxSmoothRadius, smoothNIter)
-        _writeByteArrayAsTiff(offsetsDat.replace('.dat', '.smr.tif'), radius)
+        smrTif = offsetsDat.replace('.dat', '.smr.tif')
+        if not computeSmoothRadiusMapC(dr, da, toleranceDr, toleranceDa,
+                                       maxSmoothRadius, maxSmoothRadiusA, smoothNIter,
+                                       smoothThreads, smrTif):
+            radius = computeSmoothRadiusMap(dr, da, toleranceDr, toleranceDa,
+                                            maxSmoothRadius, smoothNIter)
+            _writeByteArrayAsTiff(smrTif, radius)
     # output
     extraMeta = {'deltaT': deltaT}
     if useVel and verticalCorrection is not None:

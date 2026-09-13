@@ -1,12 +1,57 @@
 #!/usr/bin/env python3
+import glob
 import os
+import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from shutil import copyfile
 from subprocess import call
 import utilities as u
 from datetime import datetime
 import threading
 import yaml
+
+# A vel_thumb_header is named vel_thumb_header_<firstFrame>dash<lastFrame>.
+# Anything else sharing the prefix (editor backups, .save copies) is not a
+# header -- matching on the full name keeps a stray file from taking the whole
+# run down, since buildResolutionDictionary() runs over every track before any
+# velocity directory is touched.
+headerPattern = re.compile(r'^vel_thumb_header_(\d+)dash(\d+)$')
+
+
+LOGFILE = 'makevelnoclean.log'
+logLock = threading.Lock()
+
+
+def logMessage(message):
+    ''' Append a timestamped line to LOGFILE in the run directory. Excluded
+    frames are recorded here rather than on the console: there can be many of
+    them and they are an expected outcome, not something to warn about. The
+    lock keeps concurrent setup threads from interleaving lines. '''
+    with logLock:
+        with open(LOGFILE, 'a') as fp:
+            print(f'{datetime.now()}: {message}', file=fp)
+
+
+def frameExcluded(velDir):
+    ''' True when the frame holding velDir carries a hard Exclude. The file
+    lives in the frame dir, one level above velocity/ (Exclude.pending is a
+    soft flag and is deliberately not honoured here). '''
+    return os.path.exists(f'{os.path.dirname(velDir)}/Exclude')
+
+
+def removeProducts(velDir):
+    ''' Delete the mosaic products in velDir, so an excluded frame cannot leave
+    a stale velocity behind for the mosaic to pick up. Returns the number
+    removed. Inputs (runOff, inputFile) and the run logs are left alone. '''
+    removed = 0
+    for product in glob.glob(f'{velDir}/mosaicOffsets.*'):
+        try:
+            os.remove(product)
+            removed += 1
+        except OSError as error:
+            logMessage(f'{velDir}: could not remove {product}: {error}')
+    return removed
 
 
 def fixError(saptr, srptr):
@@ -20,9 +65,10 @@ def fixError(saptr, srptr):
 def getOffsetName(mainDir, suffix):
     name = {'da': '*.interp.da', 'dr': '*.interp.dr'}
     altName = {'da': '*.da.interp', 'dr': '*.dr.interp'}
-    files = u.dols(f'ls {mainDir}/{name[suffix]}')
+    files = u.globOffsetProducts(f'{mainDir}/{name[suffix]}')
     if len(files) < 1:
-        files = u.dols(f'ls {mainDir}/{altName[suffix]}')
+        # pre-2020 name order, never written in tiff mode
+        files = sorted(glob.glob(f'{mainDir}/{altName[suffix]}'))
     return files
 
 
@@ -81,12 +127,38 @@ def subOffsets(line, mainDir, fast=False):
 
 
 def runRunFile(rundir):
+    # runOff was (re)written for this run just before this call, so its mtime
+    # is a start-of-run timestamp taken from the same filesystem clock that
+    # will stamp the products -- unlike time.time() here, which is the client
+    # clock and can be skewed against a network volume by enough to make a
+    # freshly written product look stale.
+    cutoffTime = os.path.getmtime(f'{rundir}/runOff')
     fout = open(rundir+'/stdout', 'w')
     ferr = open(rundir+'/stderr', 'w')
-    command = f'cd {rundir}; csh runOff; rm *.e* *.vz*'
-    call(command, shell=True, stdout=fout, stderr=ferr)
+    command = f'cd {rundir}; csh runOff'
+    status = call(command, shell=True, stdout=fout, stderr=ferr)
     fout.close()
     ferr.close()
+    #
+    # Only clean up after a run that produced something. A failed run wrote
+    # nothing, so every file predates cutoffTime and the sweep below would
+    # delete the products the rerun was meant to replace. runOff ends with
+    # the mosaic3d call, so csh exits with mosaic3d's own status.
+    if status != 0:
+        u.mywarning(f'runOff failed in {rundir} (exit {status}) - keeping '
+                    'existing products')
+        return status
+    # error and vz bands are never kept; both the binary (.ex) and GeoTIFF
+    # (.ex.tif) spellings match. An infinite cutoff removes every match
+    # regardless of age, which is what the old `rm *.e* *.vz*` did.
+    for pattern in ('mosaicOffsets.e*', 'mosaicOffsets.vz*'):
+        u.removeStaleFiles(f'{rundir}/{pattern}', float('inf'))
+    # Products of an earlier run that this one did not overwrite -- chiefly
+    # the other output format (binary mosaicOffsets.vx/.geodat left beside a
+    # new mosaicOffsets.vx.tif/.vrt), plus anything else stale such as a
+    # legacy mosaicOffsets.report.
+    u.removeStaleFiles(f'{rundir}/mosaicOffsets.*', cutoffTime, verbose=True)
+    return status
 
 
 def makevelnocleanUsage():
@@ -114,6 +186,10 @@ def makevelnocleanUsage():
           'lastdate [2100:12:31]')
     print('\t\t-redoculled\tforces a rerun for all -- culled -- velocity '
           'directories')
+    print('\t\t\t\t(note: -redoculled rebuilds velocity/ ONLY; run again '
+          'without it, with -reset, to rebuild velocity_nocull/)')
+    print('\t\t-tiff\t\tforce GeoTIFF output (mosaic3d -GTiff) regardless of '
+          'project.yaml velThumbOutput')
     print('\t\t-reSize\t\tforces files to be run with natural bounding '
           'box new makevelstatsregions.py can run')
     print('\t\t-resolution\tOverrides resolution with new string [None]')
@@ -150,11 +226,15 @@ def getMakeVelNocleanArgs():
     resetSize = False
     resolution = None
     useHeader = False
+    forceTiff = False
     # default firstdate ensures all are processed
     firstDate = datetime(1990, 12, 31)
     lastDate = datetime(2100, 12, 31)
-    toRun = ['track-26', 'track-74', 'track-90', 'track-112', 'track-141',
-             'track-170']
+    # Default: every track-* directory here, numerically sorted (track-2 before
+    # track-10). Was a hardwired six-track list from an old project, which
+    # silently processed the wrong subset in any other tree.
+    toRun = sorted([d for d in glob.glob('track-*') if os.path.isdir(d)],
+                   key=lambda p: int(re.search(r'track-(\d+)', p).group(1)))
     if 'track' in os.getcwd():
         toRun = ['.']
     if len(sys.argv) > 1:
@@ -180,6 +260,8 @@ def getMakeVelNocleanArgs():
                 usePrompt = False
             elif '-useHeader' in arg:
                 useHeader = True
+            elif '-tiff' in arg:
+                forceTiff = True
             elif '-reSize' in arg:
                 resetSize = True
             elif 'resolution' in arg:
@@ -191,13 +273,16 @@ def getMakeVelNocleanArgs():
             else:
                 u.mywarning('Invalid argument '+arg)
                 makevelnocleanUsage()
+    if len(toRun) < 1:
+        u.myerror('no track-* directories found -- run from the project root '
+                  '(above the tracks), from inside a track dir, or pass -toRun')
     print('reset = \t\t', reset)
     print('redoCulled = \t', redoCulled)
     print('toRun = \t\t', toRun)
     print('threads = \t\th', maxThreads)
     return reset, redoCulled, toRun, maxThreads, \
         usePrompt, firstDate, lastDate, flavor, resetSize, resolution, \
-        useHeader
+        useHeader, forceTiff
 
 
 def getMetaDate(myV):
@@ -216,33 +301,49 @@ def getMetaDate(myV):
     return None
 
 
-def getVelDirs(toRun, firstDate, lastDate, tiff_output=False):
-    ''' get orginal velocity and screen by date directories'''
+def velDirDate(myV, vx_suffixes):
+    ''' (velDir, first image date) when the dir holds a velocity product, else
+    None. Reads only, so these run concurrently. '''
+    vxFile = next((os.path.join(myV, s) for s in vx_suffixes
+                   if os.path.exists(os.path.join(myV, s))), None)
+    if vxFile is None:
+        return None
+    return myV, getMetaDate(myV)
+
+
+def getVelDirs(toRun, firstDate, lastDate, tiff_output=False, maxThreads=12):
+    ''' get orginal velocity and screen by date directories.
+
+    The per-track globs and the per-frame metadata reads are both NFS-bound
+    (thousands of round trips), so each is run through a thread pool. Results
+    are reassembled in the original track order, and glob order within a track,
+    so the run list stays deterministic. '''
     veldirs = []
     myDates = []
     print(f'Only files modified after {firstDate} will run')
-    vx_suffix = 'mosaicOffsets.vx.tif' if tiff_output else 'mosaicOffsets.vx'
-    for trackDir in toRun:
-        tmp = u.dols('ls -d '+trackDir+'/*/velocity')
-        velForTrack = []
-        datesForTrack = []
-        # filter by date
-        for myV in tmp:
-            # check velocity exists
-            vxFile = os.path.join(myV, vx_suffix)
-            # print(vxFile)
-            if os.path.exists(vxFile):
-                # if it does save only if after first date
-                # stat = os.stat(vxFile)
-                # myDate = datetime.fromtimestamp(stat.st_mtime)
-                myDate = getMetaDate(myV)
-                # print(myDate, firstDate)
-                if myDate >= firstDate and myDate <= lastDate:
-                    velForTrack.append(myV)
-                    datesForTrack.append(myDate)
-        if len(velForTrack) >= 1:
-            veldirs += velForTrack
-            myDates += datesForTrack
+    # With tiff output selected, a directory still holding only the binary
+    # product is a conversion candidate, not something to skip -- accept either
+    # spelling so -redoculled/-reset can rewrite it as GeoTIFF.
+    vx_suffixes = ['mosaicOffsets.vx.tif', 'mosaicOffsets.vx'] if tiff_output \
+        else ['mosaicOffsets.vx']
+    with ThreadPoolExecutor(max_workers=max(min(maxThreads, len(toRun)), 1)) \
+            as pool:
+        perTrack = list(pool.map(
+            lambda trackDir: sorted(glob.glob(trackDir + '/*/velocity')),
+            toRun))
+    candidates = [myV for trackVels in perTrack for myV in trackVels]
+    with ThreadPoolExecutor(max_workers=max(maxThreads, 1)) as pool:
+        found = list(pool.map(lambda myV: velDirDate(myV, vx_suffixes),
+                              candidates))
+    # filter by date
+    for entry in found:
+        if entry is None:
+            continue
+        myV, myDate = entry
+        # getMetaDate warns and returns None when the meta file will not parse
+        if myDate is not None and firstDate <= myDate <= lastDate:
+            veldirs.append(myV)
+            myDates.append(myDate)
     if len(veldirs) < 1:
         u.myerror('no velocity dirs: In directory above tracks ? '
                   'Correct tracks specified ?')
@@ -250,7 +351,7 @@ def getVelDirs(toRun, firstDate, lastDate, tiff_output=False):
     return veldirs, myDates
 
 
-def addFlagToRun(destrun, flavor):
+def addFlagToRun(destrun, flavor, tiff_output=False):
     flags = {'SVConst': ' -SVConst ', ' -SVAlongTrack ': ' -SVAlongTrack ',
              'None': ' -SVConst '}  # Force all to SVConst
     fpIn = open(destrun, 'r')
@@ -263,6 +364,16 @@ def addFlagToRun(destrun, flavor):
         if 'mosaic3d' in line:
             if '-vzFlag' not in line:
                 line = line.replace('mosaic3d ', 'mosaic3d -vzFlag 3 ')
+            # Output format follows project.yaml velThumbOutput, so a runOff
+            # inherited from an earlier run in the other format is rewritten
+            # here rather than silently reproducing that format. Kept
+            # symmetric: dropping -GTiff matters as much as adding it, since
+            # the existence checks above look for the format the project asks
+            # for and would otherwise rebuild the same dir on every pass.
+            if tiff_output and '-GTiff' not in line:
+                line = line.replace('mosaic3d ', 'mosaic3d -GTiff ')
+            elif not tiff_output and '-GTiff' in line:
+                line = line.replace(' -GTiff', '')
             line = line.replace('mosaic3d ', 'mosaic3d ' + flags[flavor])
         fpOut.write(line)
     fpOut.close()
@@ -346,15 +457,24 @@ def setFlavor(defaultFlavor, velDate, redoCulled):
 
 
 def getResolution(header):
-    ''' get resolution and frame range from vel_thumb_header'''
+    ''' get resolution and frame range from vel_thumb_header. Returns {} for a
+    file that is not a <first>dash<last> header, or for a header with no
+    resolution line yet (makevelstatsregions has not been run on it)'''
     resDict = {}
-    frame1, frame2 = [int(x) for x in header.split('_')[-1].split('dash')[-2:]]
+    m = headerPattern.match(os.path.basename(header))
+    if m is None:
+        return resDict
+    frame1, frame2 = int(m.group(1)), int(m.group(2))
+    res = None
     with open(header, 'r') as fp:
         for line in fp:
             if 'resolution' in line:
                 res = line.split('=')[-1].replace('\"', '').replace("\'", '')
                 res = res.strip()
                 break
+    if res is None:
+        u.mywarning(f'no resolution line in {header} - skipping')
+        return resDict
     for frame in range(frame1, frame2+1):
         resDict[frame] = res
     return resDict
@@ -367,9 +487,11 @@ def buildResolutionDictionary(toRun):
     resolutionDict = {}  # Master dict
     for track in toRun:
         resolutionDict[track] = {}  # track specific dict
-        headers = u.dols(f'ls {track}/tiepoints/vel_thumb_header_*dash*')
+        headers = sorted(glob.glob(f'{track}/tiepoints/vel_thumb_header_*'))
         print(track)
         for header in headers:
+            if not headerPattern.match(os.path.basename(header)):
+                continue
             print(header)
             resolutionDict[track].update(getResolution(header))
     return resolutionDict
@@ -377,7 +499,7 @@ def buildResolutionDictionary(toRun):
 
 def main():
     reset, redoCulled, toRun, maxThreads, usePrompt, firstDate, lastDate,\
-        defaultFlavor, resetSize, resolution, useHeader = \
+        defaultFlavor, resetSize, resolution, useHeader, forceTiff = \
         getMakeVelNocleanArgs()
     nNotRun = 0
 
@@ -388,9 +510,18 @@ def main():
         if isinstance(_proj, dict) and _proj.get('velThumbOutput') == 'tiff':
             tiff_output = True
             print('velThumbOutput: tiff (from project.yaml)')
+    # -tiff forces GeoTIFF whether or not project.yaml says so, matching the
+    # --tiff that setupS1Tracks passes to refreshties/vel_thumbs. Without it a
+    # project missing velThumbOutput would get a GeoTIFF velocity/ and a binary
+    # velocity_nocull/, since the nocull runOff is copied from velocity/ and
+    # addFlagToRun would then strip the inherited -GTiff.
+    if forceTiff:
+        tiff_output = True
+        print('velThumbOutput: tiff (from -tiff)')
 
     # get date filtered list of files (default is all)
-    veldirs, velDates = getVelDirs(toRun, firstDate, lastDate, tiff_output)
+    veldirs, velDates = getVelDirs(toRun, firstDate, lastDate, tiff_output,
+                                   maxThreads=maxThreads)
     #for veldir, velDate in zip(veldirs, velDates):
     #    if velDate > datetime(2022, 1, 1):
     #        print(veldir, velDate)
@@ -399,7 +530,40 @@ def main():
     #
     # Loop through velocity directories
     velToRun = []
+
+    def setupRedoCulled(veldir):
+        ''' -redoculled work for one directory: refresh the runOff flags and,
+        where a thumbnail resolution applies, the input file size. Per-frame
+        file I/O on distinct paths with no shared state, so it parallelises.
+        Returns the dir to run, or None when the frame is excluded. '''
+        # An excluded frame is not rerun; its products are removed so a stale
+        # velocity cannot reach the mosaic. Logged, not warned about.
+        if frameExcluded(veldir):
+            logMessage(f'{veldir}: Exclude present - not run, removed '
+                       f'{removeProducts(veldir)} product files')
+            return None
+        # this will add vzFlag 3 to runOff for Knut's work
+        addFlagToRun(f'{veldir}/runOff', 'None', tiff_output=tiff_output)
+        myResolution = resolution
+        if useHeader:
+            frame = int(veldir.split('/')[1].split('_')[-1])
+            track = veldir.split('/')[0]
+            myResolution = resolutionDictionary[track][frame]
+        if resetSize or myResolution is not None:
+            resetInputFileSize(veldir, resolution=myResolution)
+        return veldir  # just add prior veldir to run list
+
+    if redoCulled:
+        # Thousands of NFS round trips with nothing shared between frames;
+        # pool.map keeps velToRun in the original order.
+        with ThreadPoolExecutor(max_workers=max(maxThreads, 1)) as pool:
+            velToRun = [v for v in pool.map(setupRedoCulled, veldirs)
+                        if v is not None]
+    # Serial: createNoCullInput -> subOffsets uses pushd/popd, which chdirs the
+    # whole process and so cannot be threaded.
     for veldir, velDate in zip(veldirs, velDates):
+        if redoCulled:
+            break
         inputFile = veldir + '/inputFile'
         # setup no cull dir
         mainDir = "/".join(veldir.split('/')[0:2])
@@ -408,40 +572,34 @@ def main():
         else:
             velDirNoCull = f'{veldir}_{defaultFlavor}'
         #
-        if redoCulled:
-            # this will add vzFlag 3 to runOff for Knut's work
-            addFlagToRun(f'{veldir}/runOff', 'None')
-            if useHeader:
-                frame = int(veldir.split('/')[1].split('_')[-1])
-                track = veldir.split('/')[0]
-                resolution = resolutionDictionary[track][frame]
-            if resetSize or resolution is not None:
-                resetInputFileSize(veldir, resolution=resolution)
-            velToRun.append(veldir)  # just add prior veldir to run list
-        else:
-            nocull_vx = velDirNoCull + ('/mosaicOffsets.vx.tif' if tiff_output else '/mosaicOffsets.vx')
-            if not reset and os.path.exists(nocull_vx):
-                nNotRun += 1
-                continue
-            # mkcull directory if needed
-            if not os.path.isdir(velDirNoCull):
-                os.mkdir(velDirNoCull)
-            fastOffs = f'{mainDir}/fast/azimuth.offsets.noclean.fast'
-            # if velocity has valid input file clone input file
-            if os.path.exists(inputFile):
-                createNoCullInput(inputFile, velDirNoCull, mainDir, fastOffs)
-                #
-                flavor = setFlavor(defaultFlavor, velDate, redoCulled)
-                #
-                srcrun = veldir+'/runOff'
-                destrun = velDirNoCull+'/runOff'
-                if os.path.exists(srcrun):
-                    copyfile(srcrun, destrun)
-                    velToRun.append(velDirNoCull)
-                if flavor is not None:
-                    addFlagToRun(destrun, flavor)
-                else:
-                    addFlagToRun(destrun, 'None')
+        # Excluded frames are not built; drop anything a prior run left behind.
+        if frameExcluded(veldir):
+            logMessage(f'{velDirNoCull}: Exclude present - not run, removed '
+                       f'{removeProducts(velDirNoCull)} product files')
+            continue
+        nocull_vx = velDirNoCull + ('/mosaicOffsets.vx.tif' if tiff_output else '/mosaicOffsets.vx')
+        if not reset and os.path.exists(nocull_vx):
+            nNotRun += 1
+            continue
+        # mkcull directory if needed
+        if not os.path.isdir(velDirNoCull):
+            os.mkdir(velDirNoCull)
+        fastOffs = f'{mainDir}/fast/azimuth.offsets.noclean.fast'
+        # if velocity has valid input file clone input file
+        if os.path.exists(inputFile):
+            createNoCullInput(inputFile, velDirNoCull, mainDir, fastOffs)
+            #
+            flavor = setFlavor(defaultFlavor, velDate, redoCulled)
+            #
+            srcrun = veldir+'/runOff'
+            destrun = velDirNoCull+'/runOff'
+            if os.path.exists(srcrun):
+                copyfile(srcrun, destrun)
+                velToRun.append(velDirNoCull)
+            if flavor is not None:
+                addFlagToRun(destrun, flavor, tiff_output=tiff_output)
+            else:
+                addFlagToRun(destrun, 'None', tiff_output=tiff_output)
     u.mywarning(f'{nNotRun} products already exist so skipping (set '
                 'reset flag to rebuild)')
     #
