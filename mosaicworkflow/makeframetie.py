@@ -184,6 +184,17 @@ def main():
 
     args = parser.parse_args()
     tiePlanFile = args.tiePlan
+    #
+    # A year with no data produces no tie_plan<year>, and refreshties chains one
+    # makeframetie.py per requested year with ';' in csh. Raising here therefore
+    # failed the whole chain for that track: a secondary tree that simply did not
+    # exist yet in 2015 aborted a 12-year run, and in setupS1Tracks that took the
+    # whole secondary cascade and the velocityStats step down with it. Nothing to
+    # tie is not an error, so say so and exit cleanly.
+    if not os.path.exists(tiePlanFile):
+        u.mywarning(f'makeframetie.py: no {tiePlanFile} in {os.getcwd()} - '
+                    f'nothing to tie for this year, skipping')
+        return 0
     overWriteFlag = ' --overWrite' if args.overWrite else ''
     keepVzFlag = ' --keepVz' if args.keepVz else ''
     yamlFlag = '' if args.noYaml else ' --yaml'
