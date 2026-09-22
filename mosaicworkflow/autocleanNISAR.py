@@ -112,7 +112,7 @@ def readIonCorrection(frameDir, rangeOff):
     offset-pixel units as range.offsets.vrt's own RangeOffsets band -- see
     estimateIonosphere.py's ".offset" variant), or None if range.offsets.vrt
     has no ionosphereRangeOffsetCorrection metadata tag (matches
-    makeMaster.py:find_ion_correction()'s resolution convention). Ionosphere
+    makeMaster.py:findIonCorrection()'s resolution convention). Ionosphere
     is a range/dispersive effect only -- no azimuth equivalent. '''
     ionName = rangeOff.meta.get('ionosphereRangeOffsetCorrection')
     if not ionName:
