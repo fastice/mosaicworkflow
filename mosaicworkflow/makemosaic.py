@@ -297,6 +297,15 @@ def getLists(landsatPath, fitType='custom.mask'):
 
 def incrementDate(myDate, interval):
     '''  increment by a s1 cycle, month, quarter, or year'''
+    if interval in ('s1cycle', 's1-12day'):
+        # Step along the chain standardDates builds, so the 6/12-day changes
+        # and the S1 phase shifts (mosf.S1_PHASE_SHIFTS: one 13-day window from
+        # 2026-06-02) are defined in one place. The arithmetic below is only a
+        # fallback for a date that is not on the grid.
+        nDays = 12 if interval == 's1-12day' else None
+        for window in mosf.standardDates(nDays=nDays):
+            if window['date1'] == myDate:
+                return window['date2'] + timedelta(days=1)
     if interval == 's1cycle':
         date6 = datetime(2016, 9, 20)  # Transition from 12 to 6 day
         if myDate > date6 and myDate <= datetime(2021, 12, 24):

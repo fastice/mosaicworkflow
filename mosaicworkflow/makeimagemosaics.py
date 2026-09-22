@@ -145,7 +145,9 @@ def adjustFirstDate(firstdate, nisar=False):
 
     '''
     resume6Day = datetime(2100, 1, 1) if nisar else datetime(2025, 4, 1)
-    myDates = mosf.standardDates(resume6DayDates=resume6Day)
+    # NISAR's repeat is unrelated to the S1 constellation: no S1 phase shifts
+    myDates = mosf.standardDates(resume6DayDates=resume6Day,
+                                 phaseShifts=[] if nisar else None)
     myDates.reverse()
     for myDate in myDates:
         if myDate['date1'] <= firstdate:
@@ -200,9 +202,12 @@ def getProductList(myArgs):
         anchorDate = firstDate
     resume6Day = datetime(2100, 1, 1) if myArgs.get('corr') \
         else datetime(2025, 4, 1)
+    # NISAR correlation mosaics (--corr) take no S1 phase shifts
     sDateRanges = mosf.standardDates(nDays=myArgs['nDays'],
                                      firstDate=anchorDate,
-                                     resume6DayDates=resume6Day)
+                                     resume6DayDates=resume6Day,
+                                     phaseShifts=[] if myArgs.get('corr')
+                                     else None)
     myDates = []
     for dateRange in sDateRanges:
         if dateRange['date1'] < firstDate or dateRange['date2'] > lastDate:

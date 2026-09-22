@@ -39,8 +39,8 @@ makemosaic.py [options]
 
 | Interval | Period | Notes |
 |----------|--------|-------|
-| `s1cycle` | 6 or 12 days | Follows Sentinel-1 repeat cycle; 12-day before 2016-09-20 and after 2021-12-24, 6-day between. TSX excluded. |
-| `s1-12day` | 12 days | Fixed 12-day cadence. TSX excluded. |
+| `s1cycle` | 6 or 12 days | Follows Sentinel-1 repeat cycle; 12-day before 2016-09-20 and after 2021-12-24, 6-day between. One 13-day window, 2026-06-02 – 2026-06-14, absorbs the 2026 constellation phase shift ([details](s1PhaseShift2026.md)). TSX excluded. |
+| `s1-12day` | 12 days | Fixed 12-day cadence, except one 13-day window (2026-06-08 – 2026-06-20) for the 2026 phase shift ([details](s1PhaseShift2026.md)). TSX excluded. |
 | `monthly` | 1 month | Snaps `firstdate` to first of month. |
 | `quarterly` | ~3 months | Start month from `seasonData.quarterlyDates` and `quarterlyMonth` in `mosaicsSetup.yaml`. |
 | `annual` | ~1 year | Start month from `seasonData.annualFirstMonth`. |
@@ -138,7 +138,7 @@ loop over intervals:
 | Function | Description |
 |----------|-------------|
 | `adjustFirstDate(firstdate, interval, seasonData)` | Snaps `firstdate` to the correct boundary for the chosen interval. |
-| `incrementDate(myDate, interval)` | Advances a date by one interval period. |
+| `incrementDate(myDate, interval)` | Advances a date by one interval period. For `s1cycle`/`s1-12day` it steps along the `mosaicfunc.standardDates` chain, so the grid (including `S1_PHASE_SHIFTS`) is defined in one place. |
 | `findLastDate(firstDate, myArgs)` | Returns `(endDate, year)` for the interval starting at `firstDate`. |
 | `getLists(landsatPath, fitType)` | Globs Landsat list files matching `fitType`. |
 | `createMergedList(listFiles, firstDate, lastDate)` | Concatenates list files spanning the date range into one merged file. |

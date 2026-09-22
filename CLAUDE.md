@@ -12,6 +12,7 @@ Produces the GrIMP velocity and image mosaics delivered to NSIDC. Orchestrates t
 | `makeimagemosaics` | `makeimagemosaics.py:main()` | Time-series loop for image mosaics |
 | `simoffsets` | `simoffsets.py:main()` | Simulate SAR offsets (Python wrapper) |
 | `prepareTSXrelease` | `prepareTSXrelease.py:main()` | TSX release preparation |
+| `makeMaster` | `makeMaster.py:main()` | Assemble the master `inputFile`(s) for `mosaic3d` from several source regions, driven by a YAML config (see [doc](Documents/makeMaster.md)) |
 
 The two most important programs are `makemosaic` → `setupquarters`.
 
@@ -37,7 +38,10 @@ makemosaic [--firstdate YYYY-MM-DD] [--lastdate YYYY-MM-DD]
 ### Date intervals
 
 - `s1cycle` — Sentinel-1 repeat period (6-day before 2021-12-24, 12-day otherwise)
-- `s1-12day` — always 12-day
+  with one 13-day window from 2026-06-02 to absorb the 2026 S1 phase shift
+  (`mosaicfunc.S1_PHASE_SHIFTS`; 7-day window in the 6-day geomosaic chain; NISAR
+  exempt). See [Documents/s1PhaseShift2026.md](Documents/s1PhaseShift2026.md).
+- `s1-12day` — 12-day, except one 13-day window (2026-06-08 – 2026-06-20) for the same shift
 - `monthly` — calendar month
 - `quarterly` — 3-month season (quarters defined by region in `mosaicsSetup.yaml`)
 - `annual` — calendar year (Oct–Sep for Greenland)
