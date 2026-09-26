@@ -7,6 +7,7 @@ Created on Mon Feb  3 08:45:12 2020
 """
 
 import argparse
+import shlex
 import utilities as u
 import os
 from datetime import datetime, date, timedelta
@@ -78,6 +79,43 @@ def makemosaicArgs():
     parser.add_argument('--averageAll', action='store_true', default=False,
                         help='Create a single mosaic averaging all scenes '
                         'from --firstdate to --lastdate (no date splitting)')
+    parser.add_argument('--int16', action='store_true', default=False,
+                        help='Calibrated only: Int16 dB*100 sigma0/gamma0 '
+                        '(lossless, ~2x smaller). Template key: int16')
+    parser.add_argument('--calOutput', type=str, default=None,
+                        choices=['sigma0', 'gamma0', 'both'],
+                        help='Calibrated only: products to make [both]. '
+                        'Template key: calOutput')
+    parser.add_argument('--featherDistance', type=float, default=None,
+                        help='Feather length (m); implies averaging. '
+                        'Template key: featherDistance')
+    parser.add_argument('--rangeSelect', type=str, default=None,
+                        choices=['none', 'near', 'far'],
+                        help='Keep only the near- or far-range look at each '
+                        'pixel [none]. Template key: rangeSelect')
+    parser.add_argument('--angleTolerance', type=float, default=None,
+                        help='Tolerance (deg) for rangeSelect. Template key: angleTolerance')
+    parser.add_argument('--minIncidence', type=float, default=None,
+                        help='Drop data below this incidence angle (deg). Hard '
+                        'gate: not rescued by the fallback. Template key: minIncidence')
+    parser.add_argument('--maxIncidence', type=float, default=None,
+                        help='Drop data above this incidence angle (deg). '
+                        'Template key: maxIncidence')
+    parser.add_argument('--angleRamp', action='store_true', default=False,
+                        help='Fade each input out linearly over angleTolerance '
+                        'instead of a hard cut. Template key: angleRamp')
+    parser.add_argument('--angleStride', type=int, default=None,
+                        help='Pre-pass cell size in output pixels. Template key: angleStride')
+    parser.add_argument('--nParallel', type=int, default=None,
+                        help='Tiles run concurrently. Template key: nParallel')
+    parser.add_argument('--ompThreads', type=int, default=None,
+                        help='geomosaic threads per tile. Template key: ompThreads')
+    parser.add_argument('--message', type=str, default=None,
+                        help='Free-text message stored in the release COG '
+                        'metadata. Template key: message')
+    parser.add_argument('--gcov', type=str, default=None,
+                        help='geomosaic -gcov yaml of NISAR GCOV inputs. '
+                        'Template key: gcov')
     parser.add_argument('--min', action='store_true', default=False,
                         help='Mosaic = pixel-wise minimum across all inputs')
     parser.add_argument('--max', action='store_true', default=False,
@@ -124,7 +162,22 @@ def makemosaicArgs():
               'removePad': removePad,
               'prefix': prefix, 'dateDBs': DBPaths,
               'geoMosaicMode': geoMosaicMode,
-              'nisarCycle': nisarCycle}
+              'nisarCycle': nisarCycle,
+              # forwarded to setupimagemosaic; None = use the template value
+              'int16': args.int16, 'calOutput': args.calOutput,
+              'featherDistance': args.featherDistance,
+              'message': args.message,
+              'nParallel': args.nParallel, 'ompThreads': args.ompThreads,
+              'rangeSelect': args.rangeSelect,
+              'angleTolerance': args.angleTolerance,
+              'angleStride': args.angleStride,
+              'angleRamp': args.angleRamp,
+              'minIncidence': args.minIncidence,
+              'maxIncidence': args.maxIncidence,
+              'gcov': None if args.gcov is None else os.path.abspath(args.gcov),
+              # resolved (CLI or template) for checkProduct
+              'calOutputResolved': args.calOutput or
+              templateDict.get('calOutput', 'both')}
     return myArgs
 
 
@@ -246,6 +299,15 @@ def makeImageMosaic(date1, date2, myArgs, cycleNum=None):
         command += ' --max'
     if cycleNum is not None:
         command += f' --cycleTag cycle{cycleNum:03d}'
+    if myArgs.get('int16'):
+        command += ' --int16'
+    if myArgs.get('angleRamp'):
+        command += ' --angleRamp'
+    for key in ['calOutput', 'featherDistance', 'gcov', 'message',
+                'nParallel', 'ompThreads', 'rangeSelect', 'angleTolerance',
+                'angleStride', 'minIncidence', 'maxIncidence']:
+        if myArgs.get(key) is not None:
+            command += f' --{key} {shlex.quote(str(myArgs[key]))}'
     command += f' --prefix {myArgs["prefix"]}'
     print(f'\n{command}')
     call(command, shell=True)  # , executable='/bin/csh')
@@ -295,7 +357,9 @@ def checkProduct(date1, date2, myArgs, posting, cycleNum=None):
     if myArgs.get('corr'):
         suffixes = ['corr']
     elif myArgs['calibrate']:
-        suffixes = ['gamma0', 'sigma0']
+        calOutput = myArgs.get('calOutputResolved', 'both')
+        suffixes = [calOutput] if calOutput in ('sigma0', 'gamma0') \
+            else ['gamma0', 'sigma0']
     else:
         suffixes = ['image']
     for suffix in suffixes:

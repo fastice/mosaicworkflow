@@ -223,6 +223,47 @@ TSX (TerraSAR-X) data is treated specially:
 - At least 60% coverage (`percentCover >= 0.6`)
 - Center date within half a window width of the mosaic center
 
+## Image mosaics: geomosaic output options (`makeimagemosaics` / `setupimagemosaic`)
+
+Added 2026-09-23 for NISAR GCOV mosaics. Each option is a template key, and the CLI flag of
+the same name overrides it. `makeimagemosaics` forwards the CLI flags to `setupimagemosaic`.
+With none of them set, the geomosaic command and the products are exactly as before.
+
+| template key / CLI | geomosaic | effect |
+|---|---|---|
+| `int16: true` / `--int16` | `-int16` | calibrated sigma0/gamma0 as Int16 dB×100, with scale 0.01 in the file and nodata −3000. Lossless (geomosaic rounds to 0.01 dB) and about 2× smaller. Assembly uses `-vrtnodata -3000` and a predictor in the COG. Read floats with `rioxarray(..., mask_and_scale=True)` or `gdal_translate -unscale` |
+| `calOutput: sigma0\|gamma0\|both` / `--calOutput` | `-calOutput` | products made, assembled, premet'd and checked by `checkProduct` [both] |
+| `featherDistance: <m>` / `--featherDistance` | `-fl round(m/dx)` | feathering. Implies averaging, because geomosaic refuses `-fl` with orbit priority |
+| `gcov: <yaml>` / `--gcov` | `-gcov` | NISAR GCOV HDF5 inputs, alone (`DBpaths: []`) or alongside range/Doppler inputs. Sets the NISAR platform in the premet |
+| `rangeSelect: near\|far` / `--rangeSelect` | `-nearRange` / `-farRange` | keep only the near- or far-range look at each pixel [none]. See `geomosaic.md` "Near-range / far-range selection": cross-track seams become deliberate hard boundaries, and the tolerance's real job is keeping repeat passes of the same track |
+| `angleTolerance: <deg>` / `--angleTolerance` | `-angleTolerance` | tolerance for the above [1.0]; an error without `rangeSelect` |
+| `angleStride: <n>` / `--angleStride` | `-angleStride` | pre-pass cell size in output pixels [10] |
+| `rangeSelect: near\|far` / `--rangeSelect` | `-nearRange` / `-farRange` | keep only the near- or far-range look at each pixel [none]. See `geomosaic.md` "Near-range / far-range selection" — cross-track seams become deliberate hard boundaries, and the tolerance's real job is keeping repeat passes of the same track |
+| `angleTolerance: <deg>` / `--angleTolerance` | `-angleTolerance` | tolerance for the above [1.0]; an error without `rangeSelect` |
+| `angleStride: <n>` / `--angleStride` | `-angleStride` | pre-pass cell size in output pixels [10] |
+
+| `message: <str or list of lines>` / `--message` | — | text burned into the JPG quicklook with the same `setupquarters.addLabel()` credit-block code (template `xLabel`/`yLabel` placement, font auto-fit). Also stored as COG metadata `message` (lines joined with "; "). Without it, nothing is burned into image mosaics, as before |
+
+`int16` and `calOutput` apply only to `--calibrate` runs. With `int16`, the quicklook is made
+with `-ot Byte`; otherwise GDAL writes a 12-bit JPEG that PIL and most viewers cannot open.
+
+Velocity browse images (`setupquarters`): a template `message` now replaces the default credit
+block, and without one `DEFAULT_CREDIT_LABELS` is used unchanged. `addLabel` falls back through
+`CREDIT_FONTS`, because the original DejaVu path does not exist on Ubuntu hosts (helheim/store).
+It also now returns the image rather than `None` when `xLabel`/`yLabel` are missing.
+
+**Feathering and tiles.** A tile cannot see data edges beyond its own grid, so feathering
+alone would leave steps at tile boundaries: 1.3% of pixels, up to 0.32 dB, in a test. With
+`featherDistance` set, `padInputFiles()` grows every tile by one feather length. `cropTiles()`
+crops those margins into `pieces/cropped/` before `gdalbuildvrt`; the padded originals stay, so
+`--noMosaic` reassembly is safe. Verified: the tiled result is identical to an untiled padded
+run, with 0 of 10⁶ pixels different.
+
+GCOV-only template: `DBpaths: []`, `tracks: []`, `trackOrder: []`, plus a `gcov:` yaml. Tile
+input lists then have 0 range/Doppler products. With `nisarCycle: true`, cycle N covers
+2025-09-23 + 12(N−1) and the 11 days after it; cycle 30 is 2026-09-06 to 09-17. A test setup is
+in `/Volumes/insar4/ian/Data/NISAR/Antarctica-GCOV/mosaicTest/workflowTest/`.
+
 ## Squint correction (`--useSquint`)
 
 `refreshties.py` and `makeframetie.py` both accept `--useSquint`, which threads through to `tie_script` (i.e. `insarworkflow.tieScript`), which in turn passes `-useSquint` to both `mosaic3d` and `tiepoints -motion`. Default off; can also be set project-wide via `applySquintCorrection: true` in `project.yaml` and overridden per-run by `setupNISARTracks --useSquint`/`--noUseSquint`.
