@@ -105,21 +105,15 @@ A data line is dropped, and counted in the summary, if:
 `--verbose` lists every dropped path. `--check` runs everything and prints the
 summary without writing any file.
 
-Validate a finished file with `checkinput.py <path>/inputFile`, which the tool
-prints as a suggested next step. It is a separate program and is not run
-automatically.
+Validate a finished file with [`checkinput.py <path>/inputFile`](checkinput.md),
+which the tool prints as a suggested next step. It is a separate program and is
+not run automatically.
 
-**`checkinput.py` currently crashes on a Sentinel-1 master**, and the fault is
-in `checkinput.py`, not in the file. It calls `os.path.getsize()` on the bare
-`azimuth.offsets` / `range.offsets` name with no `.vrt` fallback, so it dies
-with `FileNotFoundError` on the first VRT-migrated frame — 10,435 of the
-20,206 lines in a current full run. `mosaic3d` itself resolves those names
-correctly: `readOffsets.c:926` calls `checkForOffsetsVrt()`, which appends
-`.vrt` and uses it if present (`gdalIO.c:133`). `checkinput.py` also prints
-spurious `Missing .../az.est.yaml.const` and `.../rBaseline.deltabp.yaml.deltabp`
-warnings, because its `svConst` handling appends `.const` / `.deltabp` to names
-that already carry the newer `.yaml` suffix. Both are pre-existing staleness in
-that script, unrelated to this tool.
+Until 2026-10-04 `checkinput.py` crashed on a Sentinel-1 master: it had no
+`.vrt` fallback for VRT-migrated `azimuth.offsets` / `range.offsets`, and its
+`svConst` handling turned `az.est.yaml` / `rBaseline.deltabp.yaml` into
+nonexistent `.yaml.const` / `.yaml.deltabp` names. Both are fixed; it now lives
+in this package (see [checkinput.md](checkinput.md)).
 
 ## `nophase` — a bug fixed on 2026-09-22
 
