@@ -538,8 +538,25 @@ def velFileLoop(velFiles, frame1, frame2, frameDir, velMap, noCull, myRegion,
         orbit, frame = parseVelFilePath(velFile)
         if frame >= frame1 and frame <= frame2:
             basePath = velFile + '/mosaicOffsets'
-            if tiffMode is None:
-                tiffMode = detectFileFormat(basePath, doRA=doRA)
+            # Detect the product format PER FRAME: a track can hold binary-era
+            # frames next to GeoTIFF-era ones (insar10 Sentinel1 track-3: 39
+            # binary, 4 tif), and detecting once from the first frame made every
+            # frame of the other format unreadable (16 of 30 tracks failed on
+            # 2026-09-17). detectFileFormat is a stat, so this is free.
+            # A frame whose velocity mosaic failed (inputFile/runOff present but no
+            # product, or a .vrt pointing at tifs that were never written) used to
+            # kill the whole track's velocityStats through readData -> myerror.
+            # Skip it with a loud warning instead; one bad frame must not take
+            # every other frame of the range down with it.
+            comp1 = 'vr' if doRA else 'vx'
+            if os.path.exists(f'{basePath}.{comp1}.tif'):
+                tiffMode = True
+            elif os.path.exists(f'{basePath}.{comp1}'):
+                tiffMode = False
+            else:
+                u.mywarning(f'velocityStats.py: SKIPPING {velFile}: no mosaicOffsets.{comp1}[.tif] '
+                            f'-- the frame velocity mosaic was not produced; regenerate it')
+                continue
             vel = u.geoimage(geoType=geoType, verbose=False)
             vel.readData(basePath, tiff=tiffMode)
             if doVz:

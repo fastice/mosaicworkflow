@@ -259,14 +259,15 @@ def main():
             command = 'setuptopstie ' \
                 f'{tiesArg}  {winterFlag} {phaseFlag} {year}'
             print(command)
+            rValue = ''   # so a check_output failure can still be reported
             try:
                 rValue = str(check_output(command, shell=True),
                              'utf-8').strip('\n')
                 print(rValue)
                 nImages = int(rValue)
-            except Exception:
+            except Exception as e:
                 u.myerror(f'Error processing: \n {command:s}\n returned:\n '
-                          f'{rValue:s}\n')
+                          f'{rValue:s}\n {e}\n')
             tie_plan = 'tie_plan' + str(year)
             print('nImages -- ', nImages)
             #

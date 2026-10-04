@@ -412,7 +412,16 @@ def getPairs(year, phaseTies, winterTies, region, sensor, maxDays, framePattern=
         if date1 is None:
             continue
         #
-        if date1 >= firstDate and date1 <= lastDate and date1 != date2:
+        # A pair belongs to a year if it OVERLAPS that year's window, not merely
+        # if it starts in it.  Selecting on date1 alone dropped every pair that
+        # straddles the new year: its offsets exist, but the earlier year's plan
+        # is usually not regenerated after they are built, and the later year's
+        # plan never claims them -- so the pair fell between the two and was
+        # never tied (18 such pairs found in Sentinel1-S1A, 2026-09-19).
+        # A straddler now appears in BOTH adjacent plans, which is deliberate:
+        # whichever year is run picks it up.
+        pairLo, pairHi = min(date1, date2), max(date1, date2)
+        if pairLo <= lastDate and pairHi >= firstDate and date1 != date2:
             nD = (date2-date1).days
             if nD < 0:
                 nD = -nD
