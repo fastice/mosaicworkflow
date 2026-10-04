@@ -28,6 +28,10 @@ iceSheetRegion = 'greenland'
 iceSheetRegionFile = None
 myProjWin = None
 
+# days past a reference-date window that mosaic3d -date2 is extended with
+# --refDateSelect: covers 12- and 24-day pairs (and 36-day) referenced on the last day
+REFDATE_PAIR_MARGIN = 48
+
 regionDefs = None
 outputMaskTemplate = None
 regionID = None
@@ -277,7 +281,8 @@ def processFlags(args, template):
     flags = {}
     # Dates
     for flag in ['firstdate', 'lastdate', 'noTSX', 'noCull', 'check',
-                 'timeOverlapOff', 'noReprocess', 'noLabel', 'metaOnly', 'nThreads']:
+                 'timeOverlapOff', 'noReprocess', 'noLabel', 'metaOnly', 'nThreads',
+                 'refDateSelect', 'overlapSelect']:
         if flag in args:
             flags[flag] = getattr(args, flag)
         else:
@@ -378,6 +383,17 @@ def processQArgs():
     # flag
     parser.add_argument('-timeOverlapOff', action='store_true', default=False,
                         help='Set to turn timeOverlap off')
+    # flag
+    parser.add_argument('--overlapSelect', action='store_true', default=False,
+                        help='For <= 12-day products, keep every pair that overlaps '
+                        '[firstdate, lastdate] and pass that true window to mosaic3d, so '
+                        '-timeOverlap weights each pair by its overlap (NISAR cycle mosaics: '
+                        'a true 12-day average). Overrides --refDateSelect.')
+    parser.add_argument('--refDateSelect', action='store_true', default=False,
+                        help='For <= 12-day products, keep pairs whose reference '
+                        '(first) date is in [firstdate, lastdate] instead of those '
+                        'whose mid-date is (NISAR cycle mosaics); mosaic3d -date2 is '
+                        f'extended {REFDATE_PAIR_MARGIN} days so whole pairs count')
     # template
     parser.add_argument('--baseFlags', type=None,
                         default=None,
@@ -594,7 +610,17 @@ def writeInputFileQ(infile, xdim, ydim, dataTakes, flags):
         # use continue to skip this iteration
         # Fixed 2/7/24 (changed >= to >)
         if productType == 's1cycle':
-            if midDate < flags['firstdate'] or midDate > flags['lastdate']:
+            if flags.get('overlapSelect', False):
+                # every overlapping pair is kept (overlap test below); mosaic3d
+                # -timeOverlap weights each by the fraction inside the window
+                pass
+            elif flags.get('refDateSelect', False):
+                # NISAR cycle mosaics: whole pairs whose reference acquisition
+                # falls in the cycle (a mid-date window would split each cycle)
+                if firstDate < flags['firstdate'] or \
+                        firstDate >= flags['lastdate'] + timedelta(1):
+                    continue
+            elif midDate < flags['firstdate'] or midDate > flags['lastdate']:
                 continue
         # This is setup to pass phase data from Oct/year-1 to March/year+1
         # As such, it will provide roughly symmetrical annual average.
@@ -1009,9 +1035,43 @@ def writeRGBTiff(tiffFile, rgb, template):
     gc.collect()
 
 
-def addLabel(rgb, template):
+# Default credit block for velocity browse images; a template 'message' (string or list of
+# lines) replaces it.
+DEFAULT_CREDIT_LABELS = [
+    'Ice Velocity Map produced with the NASA MEaSUREs GrIMP workflow using one or more of the following',
+    'NISAR data processed by NASA/JPL-Caltech, archived at the ASF DAAC',
+    'Copernicus Sentinel 1 data processed by ESA, archived at the ASF DAAC',
+    'TerraSAR-X/TanDEM-X data processed and archived by DLR',
+    'Landsat 8/9 data processed and archived by USGS']
+# The first path is the original (non-Ubuntu hosts); Debian/Ubuntu and the conda copy follow.
+CREDIT_FONTS = ['/usr/share/fonts/dejavu/DejaVuSans.ttf',
+                '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+                '/home/ian/miniforge3/fonts/DejaVuSans.ttf']
+
+
+def messageLines(message):
+    ''' A template 'message' as a list of lines (None -> None). '''
+    if message is None:
+        return None
+    return [message] if isinstance(message, str) else [str(m) for m in message]
+
+
+def creditFont(fontSize):
+    ''' DejaVuSans at fontSize from the first font path that exists. '''
+    for fontFile in CREDIT_FONTS:
+        if os.path.exists(fontFile):
+            return ImageFont.truetype(fontFile, fontSize)
+    u.myerror(f'creditFont: none of {CREDIT_FONTS} exist')
+
+
+def addLabel(rgb, template, labels=None, fill=0):
     '''
     Burn the data-source credit block into the browse image.
+
+    labels (list of lines) defaults to the template's 'message' if it has one,
+    otherwise DEFAULT_CREDIT_LABELS. fill is the text value in every band
+    (0 = black, as on the velocity browse). Without xLabel/yLabel in the
+    template the image is returned unlabelled.
 
     The lead line names the WORKFLOW, not the product, so it applies to every region --
     hence no epsg test here.  It used to read 'NASA MEaSUREs GrIMP Ice Velocity Map' and was
@@ -1028,20 +1088,17 @@ def addLabel(rgb, template):
     reflect the actual input list would mean reading the sensors out of the mosaic input
     file; not done here.
     '''
-    labels = ['Ice Velocity Map produced with the NASA MEaSUREs GrIMP workflow using one or more of the following',
-              'NISAR data processed by NASA/JPL-Caltech, archived at the ASF DAAC',
-              'Copernicus Sentinel 1 data processed by ESA, archived at the ASF DAAC',
-              'TerraSAR-X/TanDEM-X data processed and archived by DLR',
-              'Landsat 8/9 data processed and archived by USGS']
+    if labels is None:
+        labels = messageLines(template.get('message')) or DEFAULT_CREDIT_LABELS
     if 'xLabel' not in template or 'yLabel' not in template:
-        return
+        return rgb  # was a bare return, which handed the caller None
     #
     #  Fit the block to the canvas.  PIL clips at the edge WITHOUT complaining, so a wording
     #  change that outgrows the space set by xLabel silently truncates the text -- which is
     #  exactly what happened when the credit block was revised.  Shift left first (keeps the
     #  font size), then shrink the font only if the widest line cannot fit at all.
     fontSize, dy, margin = 75, 80, 40
-    font = ImageFont.truetype("/usr/share/fonts/dejavu/DejaVuSans.ttf", fontSize)
+    font = creditFont(fontSize)
     width = rgb.shape[1]
     xl = template['xLabel']
     maxW = max(font.getbbox(t)[2] for t in labels)
@@ -1050,7 +1107,7 @@ def addLabel(rgb, template):
         if xlNew < margin:
             #  Too wide even hard against the left edge: scale the font to fit.
             fontSize = max(int(fontSize * (width - 2 * margin) / maxW), 10)
-            font = ImageFont.truetype("/usr/share/fonts/dejavu/DejaVuSans.ttf", fontSize)
+            font = creditFont(fontSize)
             dy = int(fontSize * 80 / 75)
             maxW = max(font.getbbox(t)[2] for t in labels)
             xlNew = max(width - maxW - margin, margin)
@@ -1066,7 +1123,7 @@ def addLabel(rgb, template):
         # Burn in each line
         for textLabel, i, in zip(labels, range(0, len(labels))):
             location = [xl, yl + i * dy]
-            draw.text(location, textLabel, fill=0, font=font)
+            draw.text(location, textLabel, fill=fill, font=font)
             rgb[:, :, bnum] = np.array(img)
     return rgb
 
@@ -1467,7 +1524,8 @@ def makeSpatial(outDir, spatialFile, template):
 
 
 def runSubMosaic(outPath, inputFileName, outFileName, baseFlags, firstDate,
-                 lastDate, lsFile, dem, stdout, stderr, failures):
+                 lastDate, lsFile, dem, stdout, stderr, failures,
+                 refDateSelect=False):
     '''
     run sub mosaics (called as a thread). Records (outFileName, inputFileName,
     reason) in the shared -- failures -- list whenever mosaic3d does not exit
@@ -1486,6 +1544,10 @@ def runSubMosaic(outPath, inputFileName, outFileName, baseFlags, firstDate,
         if productType == 'Annual':
             firstDateAdjusted = firstDateAdjusted + timedelta(-61)
             lastDateAdjusted = lastDateAdjusted + timedelta(121)
+        # Pairs were selected by reference date, so let mosaic3d see (and fully
+        # weight under -timeOverlap) each pair's whole span past the window.
+        if refDateSelect:
+            lastDateAdjusted = lastDateAdjusted + timedelta(REFDATE_PAIR_MARGIN)
         # run cull command if doCull set (otherwise only apply coverage
         flags = baseFlags + ' -date1 ' + firstDateAdjusted.strftime('%m-%d-%Y')
         flags += ' -date2 ' + lastDateAdjusted.strftime('%m-%d-%Y')
@@ -1515,11 +1577,27 @@ def runSubMosaic(outPath, inputFileName, outFileName, baseFlags, firstDate,
     return
 
 
+def utmEpsgFlags(baseFlags, epsg):
+    '''
+    Append -epsg to the mosaic3d flags for a UTM output (EPSG 32601-32660, 32701-32760).
+    Without it mosaic3d takes the output projection from the DEM, which is what the polar
+    stereographic products (3413, 3031, or a custom PS from wktFile) rely on, so they are left
+    unchanged. An -epsg already in baseFlags is left alone.
+    '''
+    if epsg is None or '-epsg' in baseFlags:
+        return baseFlags
+    code = int(epsg)
+    if 32601 <= code <= 32660 or 32701 <= code <= 32760:
+        return f'{baseFlags} -epsg {code}'
+    return baseFlags
+
+
 def processSectors(template, flags, outDir, dataTakes, lsCulledFile):
     '''
     Breakup into sections
     '''
     threads, outPieces, geoPieces, stderrs, stdouts = [], [], [], [], []
+    baseFlags = utmEpsgFlags(template['baseFlags'], regionDefs.epsg())
     # Shared across sector threads: each thread appends a record here if its
     # mosaic3d run fails, so main() can refuse to assemble stale pieces.
     failures = []
@@ -1551,14 +1629,15 @@ def processSectors(template, flags, outDir, dataTakes, lsCulledFile):
                                             args=[outDir,
                                                   inputSubFile,
                                                   outFileSub,
-                                                  template['baseFlags'],
+                                                  baseFlags,
                                                   flags['firstdate'],
                                                   flags['lastdate'],
                                                   lsCulledFile,
                                                   regionDefs.dem(),
                                                   stdout,
                                                   stderr,
-                                                  failures]
+                                                  failures,
+                                                  flags['refDateSelect'] and not flags['overlapSelect']]
                                             )
                            )
             gd = u.geodat(x0=xdim['xll'] * 0.001, y0=ydim['yll'] * 0.001,

@@ -13,6 +13,7 @@ import os
 from datetime import datetime, timedelta, date
 from subprocess import call
 import mosaicfunc as mosf
+from mosaicworkflow.makeimagemosaics import NISAR_CYCLE_EPOCH
 
 
 # Keys understood in mosaic.template.yaml (and, for sepAscDesc/projectFile,
@@ -122,10 +123,12 @@ def makemosaicArgs():
     parser.add_argument('--inputFile', type=str, default=None,
                         help='Input file for radar data [from mosaicTemplate]')
     parser.add_argument('--interval', type=str,
-                        choices=['s1cycle', 's1-12day', 'monthly', 'quarterly',
-                                 'annual', 'multiYear', 'quarterlyJFM'],
+                        choices=['s1cycle', 's1-12day', 'nisarcycle', 'monthly',
+                                 'quarterly', 'annual', 'multiYear', 'quarterlyJFM'],
                         default='monthly',
-                        help='time interval spanned')
+                        help='time interval spanned; nisarcycle = 12-day windows '
+                        'aligned to the NISAR repeat cycles (cycle 1 starts '
+                        f'{NISAR_CYCLE_EPOCH:%Y-%m-%d})')
     # parser.add_argument('--region', type=str,
     #                     choices=['greenland', 'amundsen', 'taku', 'custom'],
     #                     default='greenland',
@@ -264,6 +267,10 @@ def adjustFirstDate(firstdate, interval, seasonData):
             if myDate['date1'] <= firstdate:
                 break
         firstdate = myDate['date1']
+    elif interval == 'nisarcycle':
+        # start of the NISAR cycle containing firstdate
+        nCycles = (firstdate - NISAR_CYCLE_EPOCH).days // 12
+        firstdate = NISAR_CYCLE_EPOCH + timedelta(days=12 * nCycles)
     elif interval == 'monthly':
         # force to start at beginning of month
         firstdate = firstdate.replace(day=1)
@@ -313,7 +320,7 @@ def incrementDate(myDate, interval):
         else:
             dT = timedelta(days=12)
         return myDate + dT
-    if interval == 's1-12day':
+    if interval in ('s1-12day', 'nisarcycle'):
         return myDate + timedelta(days=12)
     # All other intervales
     dT = {'monthly': 32, 'quarterly': 93, 'quarterlyJFM': 93,
@@ -459,8 +466,13 @@ def makeCommand(firstDate, lastDate, mergedList, mosaicMaskFile, myArgs):
     if myArgs.get('nThreads') is not None:
         nThreadsArg = f'--nThreads {myArgs["nThreads"]} '
     # TSX excluded from single sycle data
-    if myArgs["interval"] == 's1cycle' or myArgs["interval"] == 's1-12day':
+    if myArgs["interval"] in ('s1cycle', 's1-12day', 'nisarcycle'):
         noTSXFlag = ' --noTSX'
+    # NISAR cycle mosaics: every pair overlapping the cycle, weighted by mosaic3d
+    # -timeOverlap over the true 12-day window (Oct 2026; --refDateSelect, which took
+    # whole pairs referenced in the cycle at full weight, defeated the overlap weighting)
+    if myArgs["interval"] == 'nisarcycle':
+        noTSXFlag += ' --overlapSelect'
 
     command = f'setupquarters.py ' \
         f'{templateArg} ' \

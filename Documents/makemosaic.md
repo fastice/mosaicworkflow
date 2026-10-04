@@ -19,7 +19,7 @@ makemosaic.py [options]
 | `--firstdate YYYY-MM-DD` | `2015-01-01` | Start of date range. Adjusted to align with interval boundaries. |
 | `--lastdate YYYY-MM-DD` | today | End of date range. |
 | `--inputFile FILE` | None | Input file for radar data (overrides template default). |
-| `--interval` | `monthly` | Time interval: `s1cycle`, `s1-12day`, `monthly`, `quarterly`, `annual`, `multiYear`, `quarterlyJFM`. |
+| `--interval` | `monthly` | Time interval: `s1cycle`, `s1-12day`, `nisarcycle`, `monthly`, `quarterly`, `annual`, `multiYear`, `quarterlyJFM`. |
 | `--noReprocess` | False | Skip reprocessing; only reformat existing data. |
 | `--noLandsat` | False | Do not include Landsat data. |
 | `--landsatPath PATH` | None | Path to directory containing Landsat list files. |
@@ -41,6 +41,7 @@ makemosaic.py [options]
 |----------|--------|-------|
 | `s1cycle` | 6 or 12 days | Follows Sentinel-1 repeat cycle; 12-day before 2016-09-20 and after 2021-12-24, 6-day between. One 13-day window, 2026-06-02 – 2026-06-14, absorbs the 2026 constellation phase shift ([details](s1PhaseShift2026.md)). TSX excluded. |
 | `s1-12day` | 12 days | Fixed 12-day cadence, except one 13-day window (2026-06-08 – 2026-06-20) for the 2026 phase shift ([details](s1PhaseShift2026.md)). TSX excluded. |
+| `nisarcycle` | 12 days | Windows aligned to the NISAR repeat cycles: cycle N spans `NISAR_CYCLE_EPOCH + 12(N-1)` days (epoch 2025-09-23, shared with `makeimagemosaics`) for 12 days. The first date snaps back to the start of its cycle. TSX excluded. Every pair overlapping the cycle is used (`setupquarters --overlapSelect`), weighted by mosaic3d `-timeOverlap` over the true 12-day window. |
 | `monthly` | 1 month | Snaps `firstdate` to first of month. |
 | `quarterly` | ~3 months | Start month from `seasonData.quarterlyDates` and `quarterlyMonth` in `mosaicsSetup.yaml`. |
 | `annual` | ~1 year | Start month from `seasonData.annualFirstMonth`. |
@@ -103,7 +104,7 @@ setupquarters.py
     --lastdate  YYYY-MM-DD
     [--noReprocess]
     [--noCull]          # when --keepFast
-    [--noTSX]           # when interval is s1cycle or s1-12day
+    [--noTSX]           # when interval is s1cycle, s1-12day or nisarcycle
     [--noLabel]
     [--baseFlags "..."]
     [--outputMask FILE]

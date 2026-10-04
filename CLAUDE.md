@@ -26,7 +26,7 @@ Front-end that loops over a date range, calling `setupquarters` once per period.
 
 ```
 makemosaic [--firstdate YYYY-MM-DD] [--lastdate YYYY-MM-DD]
-           [--interval {s1cycle,s1-12day,monthly,quarterly,annual,multiYear}]
+           [--interval {s1cycle,s1-12day,nisarcycle,monthly,quarterly,annual,multiYear}]
            [--inputFile FILE] [--landsatPath DIR]
            [--mosaicMask SHAPEFILE] [--outputMask SHAPEFILE]
            [--baseFlags "..."] [--LSFitType {custom.mask,custom,static,static.mask}]
@@ -42,6 +42,13 @@ makemosaic [--firstdate YYYY-MM-DD] [--lastdate YYYY-MM-DD]
   (`mosaicfunc.S1_PHASE_SHIFTS`; 7-day window in the 6-day geomosaic chain; NISAR
   exempt). See [Documents/s1PhaseShift2026.md](Documents/s1PhaseShift2026.md).
 - `s1-12day` — 12-day, except one 13-day window (2026-06-08 – 2026-06-20) for the same shift
+- `nisarcycle` — 12-day windows on the NISAR repeat cycles (cycle 1 = 2025-09-23,
+  `makeimagemosaics.NISAR_CYCLE_EPOCH`, so velocity and image cycle mosaics share windows);
+  no phase-shift exceptions, TSX excluded. Pair selection is `setupquarters --overlapSelect`:
+  every pair overlapping the cycle, with the true 12-day window passed to mosaic3d so
+  `-timeOverlap` weights each pair by its overlap (a true 12-day average). The earlier
+  `--refDateSelect` (whole pairs referenced in the cycle, `-date2` + 48 d) defeated that
+  weighting; it is kept as an option but no longer used by `nisarcycle`.
 - `monthly` — calendar month
 - `quarterly` — 3-month season (quarters defined by region in `mosaicsSetup.yaml`)
 - `annual` — calendar year (Oct–Sep for Greenland)
