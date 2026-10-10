@@ -23,6 +23,8 @@ Homepage = "https://github.com/fastice/mosaicworkflow"
 Repository = "https://github.com/fastice/mosaicworkflow"
 
 [project.scripts]
+checkExclude = "mosaicworkflow.checkExclude:main"
+"checkExclude.py" = "mosaicworkflow.checkExclude:main"
 checkvelsize = "mosaicworkflow.checkvelsize:main"
 "checkvelsize.py" = "mosaicworkflow.checkvelsize:main"
 grepdate = "mosaicworkflow.grepdate:main"
