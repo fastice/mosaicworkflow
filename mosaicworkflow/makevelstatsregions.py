@@ -67,6 +67,46 @@ def _boundsFromVelDir(velDir):
     return None
 
 
+def _headerBox(frameDir, baseDir):
+    """(x0, y0, xs, ys, dx, dy) in km from an existing vel_thumb_header's
+    resolution line, or None when absent or the "0 0 0 0" auto-size sentinel."""
+    filename = os.path.join(baseDir, 'tiepoints',
+                            f'vel_thumb_header_{frameDir.replace("-", "dash")}')
+    if not os.path.exists(filename):
+        return None
+    with open(filename) as fp:
+        for line in fp:
+            if line.strip().startswith('resolution'):
+                try:
+                    vals = [float(v) for v in line.split('"')[1].split()]
+                except (IndexError, ValueError):
+                    return None
+                if len(vals) == 6 and vals[2] > 0 and vals[3] > 0:
+                    return tuple(vals)
+    return None
+
+
+def _boxFromExisting(old, xMin, yMin, xMax, yMax, dx, dy, pad):
+    """Keep the existing box when every frame extent already fits inside it;
+    otherwise grow only the sides a frame crosses, by pad.
+
+    Frames are rendered on the current box, so their raster extents ARE that
+    box; re-padding their union grew every box by 3*pad (30 km, 150 px at
+    200 m) on each --runVelstatsregions run and left frames built at the old
+    size mismatched (2026-10-09, insar10 track-1). Returns None when the old
+    box is unusable (different pixel size), so the caller sizes from scratch.
+    """
+    ox0, oy0, oxs, oys, odx, ody = old
+    if abs(odx - dx) > 1e-9 or abs(ody - dy) > 1e-9:
+        return None
+    ox1, oy1 = ox0 + oxs, oy0 + oys
+    x0 = ox0 if xMin >= ox0 else round(xMin) - pad
+    y0 = oy0 if yMin >= oy0 else round(yMin) - pad
+    x1 = ox1 if xMax <= ox1 else round(xMax) + pad
+    y1 = oy1 if yMax <= oy1 else round(yMax) + pad
+    return x0, y0, x1 - x0, y1 - y0, (x0, y0, x1, y1) == (ox0, oy0, ox1, oy1)
+
+
 def writeVelThumb(frameDir, x0, y0, dx, dy, xs, ys, baseDir, dem=None):
     """Write or update a vel_thumb_header file for the given frame-range dir."""
     d = os.getcwd()
@@ -226,10 +266,21 @@ def main():
             continue
 
         dx, dy = lastDxDy
-        x0 = round(xMin) - pad
-        y0 = round(yMin) - pad
-        xs = round(xMax + pad - x0) + pad
-        ys = round(yMax + pad - y0) + pad
+        old = _headerBox(frameDir, baseDir)
+        kept = _boxFromExisting(old, xMin, yMin, xMax, yMax, dx, dy, pad) \
+            if old is not None else None
+        if kept is not None:
+            x0, y0, xs, ys, unchanged = kept
+            if unchanged:
+                print(f'{frameDir}: all frames inside the existing box -- '
+                      f'resolution unchanged ="', x0, y0, xs, ys, dx, dy, '"')
+                continue
+            print(f'{frameDir}: frames extend past the existing box -- grown')
+        else:
+            x0 = round(xMin) - pad
+            y0 = round(yMin) - pad
+            xs = round(xMax + pad - x0) + pad
+            ys = round(yMax + pad - y0) + pad
         print(f'{frameDir}: resolution ="', x0, y0, xs, ys, dx, dy, '"')
         writeVelThumb(frameDir, x0, y0, dx, dy, xs, ys, baseDir, dem=dem)
 
