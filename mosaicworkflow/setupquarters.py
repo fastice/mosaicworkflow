@@ -36,8 +36,8 @@ regionDefs = None
 outputMaskTemplate = None
 regionID = None
 
-currentVersions = {'s1cycle': 2, 's1-12day': 2, 'Monthly': 5, 'Quarterly': 5,
-                   'Annual': 6, 'multiYear': 1}   # Annual 6: S1 SMB fix (.v2 grid), 2026-10-07
+currentVersions = {'s1cycle': 2, 's1-12day': 2, 'Monthly': 6, 'Quarterly': 6,
+                   'Annual': 6, 'multiYear': 1}   # Monthly/Quarterly/Annual 6: S1 SMB fix (.v2 grid), 2026-10
 subVersions = {'s1cycle': 0, 'Monthly': 0, 'Quarterly': 0, 'Annual': 0,
                'multiYear': 0}
 
