@@ -37,6 +37,7 @@ etc. — its `velocityStats` is the prime's, through the symlink), or a NISAR pr
 | `--minWithin3Sigma F` | 0.80 | PASS needs at least this fraction within 3σ |
 | `--maxMedNorm F` | 1.5 | PASS needs every component's median \|v−mean\|/σ at or below this |
 | `--sigmaFloor S` | 5.0 m/yr | σ = max(reference sigma, this) |
+| `--minDays N` | 2 | pairs shorter than this are SKIPPED: listed, never judged, markers never changed (the 1-day S1C–S1D tandem pairs are too noisy for offsets) |
 | `--minTiepoints N` | 4 | PASS needs at least this many tiepoints in the range fit (and the azimuth fit when `requireAzSolution`); 3 points fit the model exactly, so their sigma of 0 means no redundancy |
 
 The thresholds can also be set per project in `project.yaml`; flags win:
@@ -70,6 +71,7 @@ For every frame with `Exclude.pending` (and, unless `--noAnnotate`, every hard
 | FAIL | no velocity data (the frame has no usable baseline solution, so mosaic3d wrote a blank map); or the agreement test fails; or, for Sentinel-1, the azimuth fit has no solution (setupS1Tracks step 7 would hard-Exclude it at the next update anyway) | `Exclude` = the original pending text + `<datetime>: checkExclude FAIL: <why>` + stats; `Exclude.pending` removed |
 | PASS | overlap ≥ minOverlap, within3Sigma ≥ minWithin3Sigma, every medNorm ≤ maxMedNorm, and the fits use ≥ minTiepoints | `checked` = `<datetime>: checkExclude PASS` + stats; `Exclude.pending` removed |
 | UNTESTABLE | too little overlap, no velocityStats range, or grid mismatch | left pending, listed |
+| SKIPPED | pair shorter than `minDays` | nothing |
 | ANNOTATE | hard `Exclude` | a dated stats block appended; status never changed (an empty hand-placed file, or setupisceuw's `AUTO-EXCLUDED` tag, is kept as is) |
 
 The stats are measured before any conversion, while the pending frame's velocity

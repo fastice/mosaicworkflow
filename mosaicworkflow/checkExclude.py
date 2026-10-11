@@ -56,7 +56,7 @@ gdal.UseExceptions()
 
 FRAME_RE = re.compile(r'^\d+_\d+$')
 DEFAULTS = {'minOverlap': 1000, 'minWithin3Sigma': 0.80, 'maxMedNorm': 1.5,
-            'sigmaFloor': 5.0, 'minTiepoints': 4}
+            'sigmaFloor': 5.0, 'minTiepoints': 4, 'minDays': 2}
 COMPONENTS = {'XY': (('vx', 'ex'), ('vy', 'ey')),
               'RA': (('vr', 'er'), ('va', 'ea'))}
 
@@ -185,6 +185,16 @@ def evaluateFrame(job, cfg):
            'stats': {'nTiepointsAz': nA, 'nTiepointsAzGiven': gA, 'sigmaAz': sA,
                      'nTiepointsRange': nR, 'nTiepointsRangeGiven': gR,
                      'sigmaRange': sR}}
+    # Pairs shorter than minDays (the 1-day S1C-S1D tandem pairs, too noisy
+    # for offsets) are out of scope: listed, never judged, never changed.
+    try:
+        nDays = (dt.date.fromisoformat(d2) - dt.date.fromisoformat(d1)).days
+    except ValueError:
+        nDays = None
+    if nDays is not None and nDays < cfg['minDays']:
+        rec['verdict'] = 'SKIPPED'
+        rec['why'] = f'{nDays}-day pair (< minDays {cfg["minDays"]}), out of scope'
+        return rec
     frameNum = int(frame.split('_')[1][len(cfg['framePrefix']):])
     refName = findVelStatsDir(frameNum, cfg['framePattern'], trackDir)
     refDir = os.path.join(trackDir, 'velocityStats', refName)
@@ -251,8 +261,9 @@ def reportLines(recs, cfg, project, stamp):
              f'- thresholds: minOverlap {cfg["minOverlap"]}, minWithin3Sigma '
              f'{cfg["minWithin3Sigma"]}, maxMedNorm {cfg["maxMedNorm"]}, sigmaFloor '
              f'{cfg["sigmaFloor"]} m/yr, minTiepoints {cfg["minTiepoints"]}, '
+             f'minDays {cfg["minDays"]}, '
              f'requireAzSolution {cfg["requireAzSolution"]}', '']
-    for verdict in ('PASS', 'FAIL', 'UNTESTABLE', 'ANNOTATE'):
+    for verdict in ('PASS', 'FAIL', 'UNTESTABLE', 'ANNOTATE', 'SKIPPED'):
         sel = [r for r in recs if r['verdict'] == verdict]
         lines += [f'## {verdict} ({len(sel)})', '']
         if not sel:
@@ -366,7 +377,7 @@ def replay(project, which):
     counts = dict(re.findall(r'^## (\w+) \((\d+)\)', text, re.M))
     print(f'report: {path}')
     print('  '.join(f'{v} {counts.get(v, 0)}' for v in
-                    ('PASS', 'FAIL', 'UNTESTABLE', 'ANNOTATE')))
+                    ('PASS', 'FAIL', 'UNTESTABLE', 'ANNOTATE', 'SKIPPED')))
     if st in blocks:
         print(f'\nchanges applied ({len(blocks[st])}, from {changeLog}):')
         for line in blocks[st]:
@@ -459,10 +470,11 @@ def main():
         fp.write('\n'.join(lines) + '\n')
     print('\n'.join(lines))
     counts = {v: sum(r['verdict'] == v for r in recs)
-              for v in ('PASS', 'FAIL', 'UNTESTABLE', 'ANNOTATE')}
+              for v in ('PASS', 'FAIL', 'UNTESTABLE', 'ANNOTATE', 'SKIPPED')}
     print(f'report: {out}')
     print(f'PASS {counts["PASS"]}  FAIL {counts["FAIL"]}  '
-          f'UNTESTABLE {counts["UNTESTABLE"]}  ANNOTATE {counts["ANNOTATE"]}')
+          f'UNTESTABLE {counts["UNTESTABLE"]}  ANNOTATE {counts["ANNOTATE"]}  '
+          f'SKIPPED {counts["SKIPPED"]}')
 
     if args.dryRun or not (counts['PASS'] or counts['FAIL'] or counts['ANNOTATE']):
         return 0
