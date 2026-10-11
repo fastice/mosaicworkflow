@@ -34,6 +34,7 @@ frame if its tiepoints later drop or its fit loses its solution
     checkExclude --dryRun
     checkExclude --tracks track-26 track-90
     checkExclude --yes
+    checkExclude --replay [latest | list | 20261010T1513]
 """
 import argparse
 import datetime as dt
@@ -198,8 +199,21 @@ def evaluateFrame(job, cfg):
     if kind == 'Exclude':
         rec['verdict'], rec['why'] = 'ANNOTATE', noVelocity or untestable or ''
         return rec
+    # Fit problems decide on their own -- no amount of overlap rescues a fit
+    # with no solution or no redundancy -- so they are checked first.
+    fitProblems = []
+    if cfg['requireAzSolution'] and (sA is None or sA < 0):
+        fitProblems.append('no azimuth solution (setupS1Tracks step 7 would '
+                           'hard-Exclude it)')
+    fits = [('range', nR)] + ([('azimuth', nA)] if cfg['requireAzSolution'] else [])
+    for label, n in fits:
+        if n is None or n < cfg['minTiepoints']:
+            fitProblems.append(f'{label} fit from {fmt(n)} tiepoints '
+                               f'(< {cfg["minTiepoints"]}, no redundancy)')
     if noVelocity:
         rec['verdict'], rec['why'] = 'FAIL', noVelocity
+    elif fitProblems:
+        rec['verdict'], rec['why'] = 'FAIL', '; '.join(fitProblems)
     elif untestable:
         rec['verdict'], rec['why'] = 'UNTESTABLE', untestable
     elif cmp['overlapPixels'] < cfg['minOverlap']:
@@ -214,16 +228,6 @@ def evaluateFrame(job, cfg):
             if cmp[f'medNorm_{c}'] > cfg['maxMedNorm']:
                 problems.append(f'medNorm_{c} {cmp[f"medNorm_{c}"]:.2f} > '
                                 f'{cfg["maxMedNorm"]}')
-        if cfg['requireAzSolution'] and (sA is None or sA < 0):
-            problems.append('no azimuth solution (setupS1Tracks step 7 would '
-                            'hard-Exclude it)')
-        # A fit from as few tiepoints as it has parameters is exact, not
-        # reliable: its sigma is 0 because there is no redundancy.
-        fits = [('range', nR)] + ([('azimuth', nA)] if cfg['requireAzSolution'] else [])
-        for label, n in fits:
-            if n is None or n < cfg['minTiepoints']:
-                problems.append(f'{label} fit from {fmt(n)} tiepoints '
-                                f'(< {cfg["minTiepoints"]}, no redundancy)')
         rec['verdict'] = 'FAIL' if problems else 'PASS'
         rec['why'] = '; '.join(problems) if problems else 'agrees with velocityStats'
     return rec
@@ -278,8 +282,19 @@ def statsBlock(rec, cfg, now):
     return stats
 
 
-def applyVerdicts(recs, cfg, project):
+def applyVerdicts(recs, cfg, project, changeLog, stamp):
+    """Write the markers, and one line per change to changeLog: the record of
+    what this run did to each frame (before -> after, and why)."""
     now = dt.datetime.now()
+    action = {'FAIL': 'Exclude.pending -> Exclude', 'PASS': 'Exclude.pending -> checked',
+              'ANNOTATE': 'Exclude annotated (status unchanged)'}
+    with open(changeLog, 'a') as log:
+        print(f'# checkExclude report checkExclude-{stamp}.md applied '
+              f'{now:%Y-%m-%d %H:%M:%S} {project}', file=log)
+        for r in recs:
+            if r['verdict'] in action:
+                print(f'{r["track"]}\t{r["frame"]}\t{r["date1"]}..{r["date2"]}\t'
+                      f'{action[r["verdict"]]}\t{r["why"] or "-"}', file=log)
     for r in recs:
         frameDir = os.path.join(project, r['track'], r['frame'])
         pending = os.path.join(frameDir, 'Exclude.pending')
@@ -302,6 +317,66 @@ def applyVerdicts(recs, cfg, project):
                 u.writeStatsBlock(fp, stats)
 
 
+def replay(project, which):
+    """Re-show a past run as it was printed at the start (its report) and the
+    changes it applied, from logs/checkExclude-<stamp>.md and
+    logs/checkExclude-changes.log. which: 'latest', 'list', or a stamp."""
+    logs = os.path.join(project, 'logs')
+    reports = sorted(glob.glob(os.path.join(logs, 'checkExclude-2*.md')))
+    if not reports:
+        u.myerror(f'checkExclude --replay: no reports in {logs}')
+    stampOf = lambda p: os.path.basename(p)[len('checkExclude-'):-len('.md')]
+    changeLog = os.path.join(logs, 'checkExclude-changes.log')
+    blocks = {}
+    if os.path.exists(changeLog):
+        key = None
+        for line in open(changeLog):
+            if line.startswith('#'):
+                m = re.search(r'(\d{8}T\d{4})', line)
+                if m:
+                    key = m.group(1)
+                else:
+                    # header with only the apply time: the run is the latest
+                    # report written at or before it
+                    t = re.search(r'(\d{4}-\d\d-\d\d) (\d\d):(\d\d)', line)
+                    when = f'{t.group(1).replace("-", "")}T{t.group(2)}{t.group(3)}' \
+                        if t else ''
+                    earlier = [stampOf(r) for r in reports if stampOf(r) <= when]
+                    key = earlier[-1] if earlier else None
+                blocks.setdefault(key, [])
+            elif key:
+                blocks[key].append(line.rstrip('\n'))
+    if which == 'list':
+        for r in reports:
+            st = stampOf(r)
+            head = open(r).read()
+            counts = ' '.join(f'{v} {n}' for v, n in
+                              re.findall(r'^## (\w+) \((\d+)\)', head, re.M))
+            applied = f'{len(blocks[st])} changes applied' if st in blocks \
+                else 'not applied (dry run or declined)'
+            print(f'{st}  {counts}  -- {applied}')
+        return 0
+    path = reports[-1] if which == 'latest' else \
+        os.path.join(logs, f'checkExclude-{which}.md')
+    if not os.path.exists(path):
+        u.myerror(f'checkExclude --replay: no report {path} (try --replay list)')
+    st = stampOf(path)
+    text = open(path).read()
+    print(text.rstrip('\n'))
+    counts = dict(re.findall(r'^## (\w+) \((\d+)\)', text, re.M))
+    print(f'report: {path}')
+    print('  '.join(f'{v} {counts.get(v, 0)}' for v in
+                    ('PASS', 'FAIL', 'UNTESTABLE', 'ANNOTATE')))
+    if st in blocks:
+        print(f'\nchanges applied ({len(blocks[st])}, from {changeLog}):')
+        for line in blocks[st]:
+            print('  ' + line.replace('\t', '  '))
+    else:
+        print('\nno changes recorded for this run (dry run, declined, or before '
+              'the change log existed)')
+    return 0
+
+
 def parseArgs():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -318,13 +393,24 @@ def parseArgs():
     for k, v in DEFAULTS.items():
         ap.add_argument(f'--{k}', type=type(v), default=None,
                         help=f'override project.yaml checkExclude.{k} [{v}]')
+    ap.add_argument('--firstDate', default=None,
+                    help='only frames whose pair starts on/after YYYY-MM-DD')
+    ap.add_argument('--lastDate', default=None,
+                    help='only frames whose pair starts on/before YYYY-MM-DD')
     ap.add_argument('--threads', type=int, default=4)
+    ap.add_argument('--replay', nargs='?', const='latest', default=None,
+                    metavar='STAMP|list',
+                    help='show a past run as it was printed, plus the changes it '
+                         'applied, instead of running: latest (default), list, '
+                         'or a stamp such as 20261010T1513')
     return ap.parse_args()
 
 
 def main():
     args = parseArgs()
     project = os.path.abspath(args.project)
+    if args.replay:
+        return replay(project, args.replay)
     proj = readProject(project)
     mode = str(proj.get('velocityStatsMode', 'XY')).upper()
     framePattern = proj.get('framePattern', '???')
@@ -347,8 +433,16 @@ def main():
         for fd in sorted(glob.glob(os.path.join(td, '*_*'))):
             if not (os.path.isdir(fd) and FRAME_RE.match(os.path.basename(fd))):
                 continue
-            if os.path.exists(os.path.join(fd, 'Exclude')):
-                if not args.noAnnotate:
+            if args.firstDate or args.lastDate:
+                d1 = pairDates(fd)[0]
+                if d1 == '?' or (args.firstDate and d1 < args.firstDate) or \
+                        (args.lastDate and d1 > args.lastDate):
+                    continue
+            exclude = os.path.join(fd, 'Exclude')
+            if os.path.exists(exclude):
+                # annotate once: a file this tool already wrote or annotated
+                # carries its stats already
+                if not args.noAnnotate and 'checkExclude' not in open(exclude).read():
                     jobs.append((td, fd, 'Exclude'))
             elif os.path.exists(os.path.join(fd, 'Exclude.pending')):
                 jobs.append((td, fd, 'Exclude.pending'))
@@ -378,8 +472,9 @@ def main():
         if answer.strip().lower() not in ('y', 'yes'):
             print('nothing changed')
             return 0
-    applyVerdicts(recs, cfg, project)
-    print('applied')
+    changeLog = os.path.join(project, 'logs', 'checkExclude-changes.log')
+    applyVerdicts(recs, cfg, project, changeLog, stamp)
+    print(f'applied; changes appended to {changeLog}')
     return 0
 
 

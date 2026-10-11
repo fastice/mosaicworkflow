@@ -12,7 +12,14 @@ Works on Sentinel-1 (XY: `vx/vy`, `ex/ey`) and NISAR (RA, line of sight:
 checkExclude --dryRun                        # report only
 checkExclude                                 # report, then ask before changing anything
 checkExclude --tracks track-26 track-90 --yes
+checkExclude --replay                        # re-show the latest run + its changes
+checkExclude --replay list                   # every run: verdict counts, applied or not
+checkExclude --replay 20261010T1513          # one run by its stamp
 ```
+
+`--replay` changes nothing and runs no comparison: it prints the run's report
+exactly as it was shown at the start (`logs/checkExclude-<stamp>.md`), its verdict
+counts, and then the changes that run applied, from `logs/checkExclude-changes.log`.
 
 Run from a project root: a Sentinel-1 prime, a Sentinel-1 clone (`Sentinel1-S1C`
 etc. — its `velocityStats` is the prime's, through the symlink), or a NISAR project.
@@ -23,7 +30,9 @@ etc. — its `velocityStats` is the prime's, through the symlink), or a NISAR pr
 | `--tracks` | all `track-*` | restrict to these tracks |
 | `--dryRun` | off | report only, never change markers |
 | `--yes` | off | apply without the confirmation prompt |
-| `--noAnnotate` | off | leave hard `Exclude` files alone |
+| `--noAnnotate` | off | leave hard `Exclude` files alone (a file already carrying checkExclude stats is never annotated twice) |
+| `--firstDate` / `--lastDate` | all | only frames whose pair starts in this window (from `*.pairinfo`) |
+| `--replay [latest\|list\|STAMP]` | — | show a past run and the changes it applied, instead of running |
 | `--minOverlap N` | 1000 | fewer overlapping pixels → UNTESTABLE |
 | `--minWithin3Sigma F` | 0.80 | PASS needs at least this fraction within 3σ |
 | `--maxMedNorm F` | 1.5 | PASS needs every component's median \|v−mean\|/σ at or below this |
@@ -68,7 +77,9 @@ still exists — `makevelnoclean` later removes a hard-Excluded frame's products
 so the numbers in the `Exclude` file are the only record of why.
 
 The report goes to stdout and `logs/checkExclude-<stamp>.md`, grouped by verdict,
-with tiepoints used/given for both fits.
+with tiepoints used/given for both fits. Every applied change is also appended to
+`logs/checkExclude-changes.log` (track, frame, dates, before -> after, why) — the
+running record of what the tool changed.
 
 ## `checked` is conditional
 
