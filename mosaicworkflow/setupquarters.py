@@ -316,6 +316,13 @@ def processFlags(args, template):
     template = resolveNumericBaseFlag(template, args.template, 'jointMaxSigmaRange',
                                      'jointMaxSigmaRange',
                                      cliValue=getattr(args, 'jointMaxSigmaRange', None))
+    # Chi2 blunder screen.  chi2SpeedFrac makes it speed dependent (real change within the
+    # window grows with speed and window length), so it is set per interval template.
+    template = resolveNumericBaseFlag(template, args.template, 'maxChi2', 'maxChi2',
+                                     cliValue=getattr(args, 'maxChi2', None))
+    template = resolveNumericBaseFlag(template, args.template, 'chi2SpeedFrac',
+                                     'chi2SpeedFrac',
+                                     cliValue=getattr(args, 'chi2SpeedFrac', None))
     template = resolveBooleanBaseFlag(template, args.template, 'legacyPairPhase',
                                       'legacyPairPhase',
                                       cliValue=getattr(args, 'legacyPairPhase', False))
@@ -409,6 +416,12 @@ def processQArgs():
     parser.add_argument('--jointMaxSigmaRange', type=float, default=None,
                         help='Same for crossing-RANGE; overrides template and project.yaml '
                              '[mosaic3d default 100]')
+    parser.add_argument('--maxChi2', type=float, default=None,
+                        help='Reject solved pixels whose reduced chi2 exceeds this; overrides '
+                             'template and project.yaml [mosaic3d default -1 = off]')
+    parser.add_argument('--chi2SpeedFrac', type=float, default=None,
+                        help='Speed-dependent maxChi2: model error F*|v| for real change within '
+                             'the window; overrides template and project.yaml [mosaic3d default 0 = off]')
     parser.add_argument('--legacyPairPhase', action='store_true', default=False,
                         help='Use the ORIGINAL pairwise crossing-phase solver')
     parser.add_argument('--legacyPairRange', action='store_true', default=False,
