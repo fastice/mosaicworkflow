@@ -617,20 +617,22 @@ def processAll(fout, allOrbGroups, year, tracknum):
     return count
 
 
-def setupExtraTies(fout, tieFilesData, track, tracknum, year, extraTies):
+def setupExtraTies(fout, tieFilesData, track, tracknum, year, extraTies, densityVariant=False):
     '''
-    Create the bedrock ties for multiple periods
+    Create the bedrock ties for multiple periods. densityVariant (default off since 2026-10-19) also writes the
+    1y<year>_480 tie file from <extraTies>.480, the alternate firn-density vertical-correction scenario that
+    tieScript fits only when verticalCorrection is set.
     '''
     if tieFilesData is None:
         print(f'\nsubdir {track}', file=fout)
         print(f'\textraties={extraTies}', file=fout)
         print(f'\ttiefile 1y{year}', file=fout)
         print(f'\t\t{tracknum} bedrock', file=fout)
-        
-        print(f'\nsubdir {track}', file=fout)
-        print(f'\textraties={extraTies}.480', file=fout)
-        print(f'\ttiefile 1y{year}_480', file=fout)
-        print(f'\t\t{tracknum} bedrock', file=fout)
+        if densityVariant:
+            print(f'\nsubdir {track}', file=fout)
+            print(f'\textraties={extraTies}.480', file=fout)
+            print(f'\ttiefile 1y{year}_480', file=fout)
+            print(f'\t\t{tracknum} bedrock', file=fout)
         print('# force extra ties reset', file=fout)
         print(f'\nsubdir {track}', file=fout)
         print(f'\textraties={extraTies}', file=fout)
