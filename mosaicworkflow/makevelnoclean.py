@@ -364,6 +364,24 @@ def addFlagToRun(destrun, flavor, tiff_output=False):
         if 'mosaic3d' in line:
             if '-vzFlag' not in line:
                 line = line.replace('mosaic3d ', 'mosaic3d -vzFlag 3 ')
+            # Every pixel with offsets must get a result: the hopper's sigma
+            # gate (default -jointMaxSigma 35 m/yr plus a 3%-of-speed cap)
+            # empties whole frames of noisy short pairs, e.g. insar9
+            # track-26/61523_573 kept 57 of 1,790,840 pixels. Added only when
+            # absent, so an explicit setting is kept and reruns do not stack
+            # it; the bare -jointMaxSigma is matched so -jointMaxSigmaRange
+            # or -jointMaxSigmaPhase do not count.
+            if not re.search(r'-jointMaxSigma\s', line):
+                line = line.replace('mosaic3d ', 'mosaic3d -jointMaxSigma 0 ')
+            if '-gateSpeedFrac' not in line:
+                line = line.replace('mosaic3d ', 'mosaic3d -gateSpeedFrac 0 ')
+            # A per-frame velocity is a one-image mosaic: the legacy pipeline
+            # gives the same velocities as the hopper (median |dv| 0.01 m/yr on
+            # track-26/61523_573) about 25% faster, matching what velThumbs
+            # writes. It implies -legacyCode, so the two gate flags above are
+            # inert while it is present.
+            if '-legacyPairRange' not in line:
+                line = line.replace('mosaic3d ', 'mosaic3d -legacyPairRange ')
             # Output format follows project.yaml velThumbOutput, so a runOff
             # inherited from an earlier run in the other format is rewritten
             # here rather than silently reproducing that format. Kept
