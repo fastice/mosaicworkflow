@@ -698,23 +698,72 @@ def writeOffPoly(fileName, coeffR, coeffA):
           file=fp)
 
 
+def readVelocityWindow(velMap, srsInfo, lat, lon, padPixels=2):
+    """
+    Read only the part of a multi-band velocity map (one GDAL file with vx/vy
+    bands, e.g. the Antarctic VRT) that covers lat/lon, instead of loading and
+    processing the whole map for every frame (~44 s per frame for Antarctica).
+    Same geodat, orientation, NaN handling and speed as geoimage.readData,
+    restricted to the window, as geoimage.readDataWindow does for per-component
+    files. Returns None (caller falls back to readData) for any other kind of map.
+    """
+    vel = u.geoimage(geoType='velocity')
+    if not velMap.lower().endswith(('.tif', '.vrt')) or \
+            all(os.path.exists(f) for f in vel.dataFileNames(velMap, tiff=True)):
+        return None
+    bandMap = vel._multibandComponents(velMap)
+    if bandMap is None:
+        return None
+    wkt = vel.getWKT_PROJ(srsInfo['epsg'], srsInfo['wktFile'])
+    domain = vel.getDomain(srsInfo['epsg'])
+    vel.getGeoFile(velMap, domain, tiff=True, wkt=wkt, multibandFile=velMap)
+    full = vel.geo
+    x, y = full.lltoxykm(lat, lon)
+    good = np.isfinite(x) & np.isfinite(y)
+    if not good.any():
+        return None
+    dxKm, dyKm = full.pixSizeInKm()
+    c0 = max(int(np.floor((np.min(x[good]) - full.x0) / dxKm)) - padPixels, 0)
+    c1 = min(int(np.ceil((np.max(x[good]) - full.x0) / dxKm)) + padPixels + 1, full.xs)
+    r0 = max(int(np.floor((np.min(y[good]) - full.y0) / dyKm)) - padPixels, 0)
+    r1 = min(int(np.ceil((np.max(y[good]) - full.y0) / dyKm)) + padPixels + 1, full.ys)
+    if c1 <= c0 or r1 <= r0:
+        return None
+    vel.geo = u.geodat(x0=full.x0 + c0 * dxKm, y0=full.y0 + r0 * dyKm,
+                       xs=c1 - c0, ys=r1 - r0, dx=full.dx, dy=full.dy,
+                       domain=domain, verbose=False, wkt=wkt)
+    vel.xyCoordinates()
+    ds = gdal.Open(velMap)
+    for comp in ('vx', 'vy'):
+        arr = np.flipud(ds.GetRasterBand(bandMap[comp]).ReadAsArray(
+            c0, full.ys - r1, c1 - c0, r1 - r0))
+        if np.sum(np.isnan(arr)) == 0 and isinstance(arr[0, 0], np.floating):
+            arr[arr <= -2.e9] = np.nan
+        setattr(vel, comp, arr)
+    ds = None
+    vel.v = np.sqrt(vel.vx.astype(float) ** 2 + vel.vy.astype(float) ** 2)
+    return vel
+
+
 def computeVelocityRA(velMap, offsets1, srsInfo):
     """
     Read and interpolate velMap for points lat1, lon1 and return in radar
     coordinates
     """
-    # get velocity
-    vel = u.geoimage(geoType='velocity')
-    # Modern velMaps are a single GDAL file (.tif/.vrt, often with vx/vy as
-    # separate bands -- see geoimage._multibandComponents); legacy velMaps
-    # are flat binary + .vx.geodat/.vy.geodat sidecars, with no extension
-    # to key off of.
-    isTiff = velMap.lower().endswith(('.tif', '.vrt'))
-    vel.readData(velMap, epsg=srsInfo['epsg'], wktFile=srsInfo['wktFile'],
-                 tiff=isTiff)
+    lat1, lon1 = offsets1.getLatLon()
+    # get velocity: just the frame's window when possible
+    vel = readVelocityWindow(velMap, srsInfo, lat1, lon1)
+    if vel is None:
+        vel = u.geoimage(geoType='velocity')
+        # Modern velMaps are a single GDAL file (.tif/.vrt, often with vx/vy as
+        # separate bands -- see geoimage._multibandComponents); legacy velMaps
+        # are flat binary + .vx.geodat/.vy.geodat sidecars, with no extension
+        # to key off of.
+        isTiff = velMap.lower().endswith(('.tif', '.vrt'))
+        vel.readData(velMap, epsg=srsInfo['epsg'], wktFile=srsInfo['wktFile'],
+                     tiff=isTiff)
 
     # compute xy angle, heading, and angle for rotation
-    lat1, lon1 = offsets1.getLatLon()
     xps1, yps1 = vel.geo.lltoxykm(lat1, lon1)
     xyAngle = np.arctan2(-yps1, -xps1)
     rotAngle = (offsets1.computeHeading() + np.pi/2.) - xyAngle
