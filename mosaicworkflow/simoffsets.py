@@ -298,6 +298,15 @@ def simOffsetsProcessArgs1():
                         help='Variable smoothing-radius map: threads for the smoothradius '
                         'binary. Memory is ~0.9 GB + 0.3 GB per thread on a 13 Mpixel '
                         'grid [2]')
+    parser.add_argument('--alsoVelocity', type=str, default=None, metavar='VELOCITY.dat',
+                        help='With -noVel: also write the velocity simulation for VELOCITY.dat '
+                        '(same grid) from the SAME siminsar -toLL run and lltora pass, instead of a '
+                        'second simoffsets call. Its mask is the tracking mask (-fastMask applies); '
+                        '--iceRockWaterMask/--iceMask apply to the geometry mask only; '
+                        '--verticalCorrection and the smoothing-radius options apply to the '
+                        'velocity product only. Outputs are byte-identical to two separate calls [None]')
+    parser.add_argument('--alsoVelocityAzOffsets', type=str, default=None,
+                        help='azOffsets for --alsoVelocity [VELOCITY.dat with .dat -> .da]')
     parser.add_argument('--smoothNIter', type=int, default=3,
                         help='Variable smoothing-radius map: repeated box-filter passes '
                         'per sweep step (Gaussian-ish) [3]')
@@ -311,6 +320,11 @@ def simOffsetsProcessArgs1():
         u.myerror('simoffsets: --minTol/--percentSpeed/--maxTol must be given together')
     if args.maxSmoothRadiusA is None:
         args.maxSmoothRadiusA = args.maxSmoothRadius
+    if args.alsoVelocity is not None:
+        if not args.noVel:
+            u.myerror('simoffsets: --alsoVelocity needs -noVel (the main product is the geometry)')
+        if args.alsoVelocityAzOffsets is None:
+            args.alsoVelocityAzOffsets = args.alsoVelocity.replace('.dat', '.da')
     for radiusArg in ['maxSmoothRadius', 'maxSmoothRadiusA']:
         if getattr(args, radiusArg) > 255:
             print(f'WARNING: --{radiusArg} {getattr(args, radiusArg)} exceeds byte range, '
@@ -339,7 +353,7 @@ def simOffsetsProcessArgs1():
         byteOrder, args.ompThreads, args.iceRockWaterMask, args.iceMask, args.tiff, \
         args.verticalCorrection, fp, failFile, args.minTol, args.percentSpeed, \
         args.maxTol, args.maxSmoothRadius, args.maxSmoothRadiusA, \
-        args.smoothThreads, args.smoothNIter
+        args.smoothThreads, args.smoothNIter, args.alsoVelocity, args.alsoVelocityAzOffsets
 
 
 def resolveRegion(args):
@@ -803,7 +817,7 @@ def printError(msg, var, fp):
 
 
 def runSim(geodatFile, offsetsDat, dem, maskInputFile, syncDat,
-           byteOrder='MSB', ompThreads=4, tiff=False):
+           byteOrder='MSB', ompThreads=4, tiff=False, mask2=None):
     """
     runSim - run simulation with siminsar
     If no offsets.lat/lon/dat, create them
@@ -828,62 +842,19 @@ def runSim(geodatFile, offsetsDat, dem, maskInputFile, syncDat,
     #
     tiffFlag = '-tiff' if tiff else ''
     offsetsRoot = offsetsDat.replace('.dat', '').replace('.vrt', '')
+    # mask2 = (maskFile, outRoot): siminsar also samples maskFile at the same lat/lon and writes
+    # outRoot's -toLL outputs (--alsoVelocity)
+    mask2Flag = '' if mask2 is None else f'-mask2 {mask2[0]} {mask2[1]} '
     command = f'siminsar {byteOrderFlag} {tiffFlag} -ompThreads {ompThreads} ' \
-        f'-center -toLL {offsetsDat} -mask ' \
+        f'-center -toLL {offsetsDat} -mask {mask2Flag}' \
         f'-xyDEM {dem}  {maskInputFile} {geodatFile} {offsetsRoot}'
     print(command)
     call(command, shell=True)  # executable='/bin/csh')
 
 
-def main():
-    """
-    Simulate offsets for input to strack programs
-    """
-    #
-    # this will indicate a fail, unless program completes and removes
-    #
-    azOffsets, offsetsDat, myRegion, geodatFile, secondGeoDatFile, syncDat, \
-        fastMask, useVel, byteOrder, ompThreads, iceRockWaterMask, iceMask, tiff, \
-        verticalCorrection, fp, failFile, minTol, percentSpeed, maxTol, \
-        maxSmoothRadius, maxSmoothRadiusA, smoothThreads, smoothNIter = \
-        simOffsetsProcessArgs1()
-    #
-    for key in myRegion.region:
-        print(myRegion.region[key])
-    #
-    if not os.path.exists(secondGeoDatFile):
-        printError('Second geodatFile  not found: ', secondGeoDatFile, fp)
-        exit()
-    #
-    # run simoff
-    #
+def loadSimOffsets(azOffsets, offsetsDat, geodatFile, tiff):
+    """ offsets object for a siminsar -toLL product (lat/lon, mask) """
     maskFile = offsetsDat.replace('.dat', '.mask').replace('.vrt', '.mask')
-    if tiff:
-        llVrt = offsetsDat.replace('.dat', '.ll.vrt').replace('.vrt', '.ll.vrt')
-        # siminsar -tiff writes the mask as <root>.mask.tif + <root>.mask.vrt,
-        # so testing for the raw <root>.mask would re-run the sim every time.
-        needSim = not os.path.exists(llVrt) \
-                  or not os.path.exists(f'{maskFile}.vrt') \
-                  or not os.path.exists(offsetsDat) or syncDat
-    else:
-        latFile = offsetsDat.replace('.dat', '.lat').replace('.vrt', '.lat')
-        lonFile = offsetsDat.replace('.dat', '.lon').replace('.vrt', '.lon')
-        needSim = not os.path.exists(latFile) or not os.path.exists(lonFile) \
-                  or not os.path.exists(maskFile) \
-                  or not os.path.exists(offsetsDat) or syncDat
-    if iceRockWaterMask:
-        maskInputFile = myRegion.iceRockWaterMask()
-    elif iceMask:
-        maskInputFile = myRegion.icemask()
-    else:
-        maskInputFile = [myRegion.mask(), myRegion.fastmask()][fastMask]
-    #
-    if needSim:
-        runSim(geodatFile, offsetsDat, myRegion.dem(), maskInputFile, syncDat,
-               byteOrder=byteOrder, ompThreads=ompThreads, tiff=tiff)
-    #
-    # load offsets
-    #
     latLonRoot = azOffsets.replace('.da', '')
     #
     vrtFile = None
@@ -897,18 +868,13 @@ def main():
         # getMask() below reads maskVrtFile when set, otherwise the raw maskFile
         # -- which siminsar -tiff no longer writes.
         offsets1.maskVrtFile = f'{maskFile}.vrt'
-    #
-    secondGeodatRxA = geodatrxa(file=secondGeoDatFile, echo=False)
-    # compute deltaT
-    deltaT = secondGeodatRxA.datetime.date() - \
-        offsets1.geodatrxa.datetime.date()
-    deltaT = deltaT.days
-    #
-    # Compute offsets with no velocity
-    dr0, da0, coeffR, coeffA = computeStaticOffsets(offsets1, secondGeoDatFile,
-                                                    myRegion.dem())
-    #
-    writeOffPoly(offsetsDat.replace('.dat', '.poly'), coeffR, coeffA)
+    return offsets1
+
+
+def finishSimOffsets(offsets1, dr0, da0, deltaT, azOffsets, offsetsDat, myRegion, useVel,
+                     verticalCorrection, byteOrder, tiff, minTol, percentSpeed, maxTol,
+                     maxSmoothRadius, maxSmoothRadiusA, smoothThreads, smoothNIter):
+    """ Add motion to the static offsets dr0/da0 (modified in place), write the product """
     #
     # compute motion offsets
     #
@@ -988,6 +954,106 @@ def main():
                                 ['RangeOffsets', 'AzimuthOffsets'],
                                 byteOrder=byteOrder,
                                 additionalMetaData=extraMeta)
+
+
+def main():
+    """
+    Simulate offsets for input to strack programs
+    """
+    #
+    # this will indicate a fail, unless program completes and removes
+    #
+    azOffsets, offsetsDat, myRegion, geodatFile, secondGeoDatFile, syncDat, \
+        fastMask, useVel, byteOrder, ompThreads, iceRockWaterMask, iceMask, tiff, \
+        verticalCorrection, fp, failFile, minTol, percentSpeed, maxTol, \
+        maxSmoothRadius, maxSmoothRadiusA, smoothThreads, smoothNIter, \
+        velocityDat, velocityAzOffsets = simOffsetsProcessArgs1()
+    #
+    for key in myRegion.region:
+        print(myRegion.region[key])
+    #
+    if not os.path.exists(secondGeoDatFile):
+        printError('Second geodatFile  not found: ', secondGeoDatFile, fp)
+        exit()
+    #
+    # --alsoVelocity: the velocity product shares this run's grid, lat/lon and static offsets
+    #
+    velFp, velFailFile = None, None
+    if velocityDat is not None:
+        if not os.path.exists(velocityDat) or not os.path.exists(offsetsDat) or \
+                open(velocityDat).read().split() != open(offsetsDat).read().split():
+            printError('--alsoVelocity needs the same grid in both dat files: ', velocityDat, fp)
+            exit()
+        velRoot = velocityDat.replace('.dat', '').replace('.vrt', '')
+        velFailFile = os.path.join(os.path.dirname(os.path.abspath(velRoot)),
+                                   f'fail.simoffsets.{os.path.basename(velRoot)}')
+        velFp = open(velFailFile, 'w')
+    #
+    # run simoff
+    #
+    maskFile = offsetsDat.replace('.dat', '.mask').replace('.vrt', '.mask')
+    if tiff:
+        llVrt = offsetsDat.replace('.dat', '.ll.vrt').replace('.vrt', '.ll.vrt')
+        # siminsar -tiff writes the mask as <root>.mask.tif + <root>.mask.vrt,
+        # so testing for the raw <root>.mask would re-run the sim every time.
+        needSim = not os.path.exists(llVrt) \
+                  or not os.path.exists(f'{maskFile}.vrt') \
+                  or not os.path.exists(offsetsDat) or syncDat
+    else:
+        latFile = offsetsDat.replace('.dat', '.lat').replace('.vrt', '.lat')
+        lonFile = offsetsDat.replace('.dat', '.lon').replace('.vrt', '.lon')
+        needSim = not os.path.exists(latFile) or not os.path.exists(lonFile) \
+                  or not os.path.exists(maskFile) \
+                  or not os.path.exists(offsetsDat) or syncDat
+    if iceRockWaterMask:
+        maskInputFile = myRegion.iceRockWaterMask()
+    elif iceMask:
+        maskInputFile = myRegion.icemask()
+    else:
+        maskInputFile = [myRegion.mask(), myRegion.fastmask()][fastMask]
+    mask2 = None
+    if velocityDat is not None:
+        # the velocity run of ROFFtoGrimp uses the tracking mask
+        mask2 = ([myRegion.mask(), myRegion.fastmask()][fastMask], velRoot)
+        needSim = True
+    #
+    if needSim:
+        runSim(geodatFile, offsetsDat, myRegion.dem(), maskInputFile, syncDat,
+               byteOrder=byteOrder, ompThreads=ompThreads, tiff=tiff, mask2=mask2)
+    #
+    # load offsets
+    #
+    offsets1 = loadSimOffsets(azOffsets, offsetsDat, geodatFile, tiff)
+    #
+    secondGeodatRxA = geodatrxa(file=secondGeoDatFile, echo=False)
+    # compute deltaT
+    deltaT = secondGeodatRxA.datetime.date() - \
+        offsets1.geodatrxa.datetime.date()
+    deltaT = deltaT.days
+    #
+    # Compute offsets with no velocity
+    dr0, da0, coeffR, coeffA = computeStaticOffsets(offsets1, secondGeoDatFile,
+                                                    myRegion.dem())
+    #
+    writeOffPoly(offsetsDat.replace('.dat', '.poly'), coeffR, coeffA)
+    if velocityDat is None:
+        finishSimOffsets(offsets1, dr0, da0, deltaT, azOffsets, offsetsDat, myRegion, useVel,
+                         verticalCorrection, byteOrder, tiff, minTol, percentSpeed, maxTol,
+                         maxSmoothRadius, maxSmoothRadiusA, smoothThreads, smoothNIter)
+    else:
+        # geometry product exactly as a -noVel call (no vertical correction, no smoothing map)
+        finishSimOffsets(offsets1, dr0.copy(), da0.copy(), deltaT, azOffsets, offsetsDat,
+                         myRegion, False, verticalCorrection, byteOrder, tiff, None, None,
+                         None, maxSmoothRadius, maxSmoothRadiusA, smoothThreads, smoothNIter)
+        # velocity product from its own -toLL files (written by siminsar -mask2)
+        offsets2 = loadSimOffsets(velocityAzOffsets, velocityDat, geodatFile, tiff)
+        writeOffPoly(velocityDat.replace('.dat', '.poly'), coeffR, coeffA)
+        finishSimOffsets(offsets2, dr0, da0, deltaT, velocityAzOffsets, velocityDat, myRegion,
+                         True, verticalCorrection, byteOrder, tiff, minTol, percentSpeed,
+                         maxTol, maxSmoothRadius, maxSmoothRadiusA, smoothThreads, smoothNIter)
+        velFp.close()
+        if os.path.isfile(velFailFile):
+            os.remove(velFailFile)
     #
     # remove flag file
     #
