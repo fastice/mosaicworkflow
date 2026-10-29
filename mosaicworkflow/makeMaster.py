@@ -95,7 +95,11 @@ LEGACYSOURCE = {
     'filePattern': 'track-{track}/tiepoints/track-{track}/inputFile-{track}-all20??',
     'lineFilter': 'heuristic',
     'normalizeSlashes': False,
-    'excludeMarker': None,
+    # NotForMosaic beside the geodat drops that virtual frame from the master.  A distinct name
+    # from Exclude/Exclude.pending, which mean something else in the NISAR projects; used for
+    # Antarctica80's 40 MHz virtual frames that duplicate Antarctica40's (same granules), which
+    # otherwise put the same pair into the combined master twice (2026-10-29).
+    'excludeMarker': 'NotForMosaic',
     'checkFields': 'all',
     'vrtFallback': True,
     'checkIonosphere': True,
