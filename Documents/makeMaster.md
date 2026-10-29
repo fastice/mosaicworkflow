@@ -24,6 +24,10 @@ callers keep working. It is selected when any of `--projectDir`,
 `--inputPaths` or `--outputPath` is given, or when no config is named and no
 `masterInput.yaml` exists. `nisargrimpworkflow.autoupdate` uses this path via
 the `masterInputPaths` / `masterOutputPath` keys of `autoupdate.yaml`.
+One addition since 2026-10-29: a virtual frame with a `NotForMosaic` file beside its geodat is left
+out. Antarctica80's 40 MHz virtual frames that duplicate Antarctica40's (same granules) carry it, so the
+combined master does not list the same 40 MHz pair twice
+(`Antarctica2026/siminsarFix/markDuplicate40.py` writes the markers).
 
 Both modes produce byte-identical output to the tools they replace — see
 *Verification* below.
