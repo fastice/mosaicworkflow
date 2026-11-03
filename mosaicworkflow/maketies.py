@@ -145,7 +145,15 @@ def makeTiesArgs(year):
 def getSensorTrackInfo():
     #
     # assumes in SensorXX/region/track-tracknum
+    # Use the logical path ($PWD) when it is this directory: TSX link regions
+    # (nw4A/track-112 -> ../nw4/track-112) keep their tie setup in the LINK
+    # region, and os.getcwd() resolves the link to nw4/, whose tiepoints/ does
+    # not exist, so no tie plans were made (regression from 105e0bc, which
+    # replaced the original os.environ['PWD']).
     cwd = os.getcwd()
+    pwd = os.environ.get('PWD')
+    if pwd and os.path.isdir(pwd) and os.path.samefile(pwd, cwd):
+        cwd = pwd
     track = cwd.split('/')[-1]
     # e.g., Jak, ikeq
     region = cwd.split('/')[-2]

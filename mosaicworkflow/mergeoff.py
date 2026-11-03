@@ -144,9 +144,13 @@ def doTheMerge(offR, offF, sensorInfo):
                                  wF * offF.sigmaR[iSame]**2)
     offM.sigmaA[iSame] = np.sqrt(wR * offR.sigmaA[iSame]**2 +
                                  wF * offF.sigmaA[iSame]**2)
-    print(np.min(offM.sigmaA[iSame]), np.max(offM.sigmaR[iSame]))
-    print(np.min(offR.sigmaA[iSame]), np.max(offR.sigmaR[iSame]))
-    print(np.min(offF.sigmaA[iSame]), np.max(offF.sigmaR[iSame]))
+    # diagnostics only; skip them when regular and fast offsets do not overlap
+    # (np.min of an empty selection raised and stopped the merge before the
+    # fast-only points were added)
+    if iSame.any():
+        print(np.min(offM.sigmaA[iSame]), np.max(offM.sigmaR[iSame]))
+        print(np.min(offR.sigmaA[iSame]), np.max(offR.sigmaR[iSame]))
+        print(np.min(offF.sigmaA[iSame]), np.max(offF.sigmaR[iSame]))
     # Make sure the fast offsets files have the geodat information so that
     # qa can use svfit for velocity_nocull
 
