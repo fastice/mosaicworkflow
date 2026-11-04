@@ -14,7 +14,7 @@ import threading
 import shutil
 import random
 from operator import itemgetter
-currentVersion = '04'
+currentVersion = '05'
 subVersion = '0'
 
 
@@ -330,8 +330,12 @@ def makeRunOff(outDir, shelfMask, dem):
     #
     try:
         fp = open(f'{outDir}/runOff', 'w')
-        print(f'#\nset DEM={dem}\n#', file=fp)
+        print(f'#\nsetenv OPENBLAS_NUM_THREADS 1\nset DEM={dem}\n#', file=fp)
+        # same per-pair flags as the per-frame velocities (velThumbs /
+        # makevelnoclean): legacy pipeline, no hopper sigma gate. Reproduces
+        # the v04 products bit for bit on unchanged inputs.
         print(f'mosaic3d -fl 20 -offsets -rOffsets -center -no3d -noVh '
+              f'-legacyPairRange -jointMaxSigma 0 -gateSpeedFrac 0 '
               f'{shelfMaskArg} inputFile $DEM mosaicOffsets', file=fp)
     except Exception:
         u.myerror(f'Problem making runOff in {outDir}')
