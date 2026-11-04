@@ -161,15 +161,19 @@ def prepReleaseDir(releaseDir, boxName):
 
 
 def checkOffs(offDirsUse):
-    parts = ['azimuth.offsets', 'range.offsets', 'geodat3x3.in',
-             'motion/baseline.3x3', 'motion/az.est', 'motion/rBaseline',
-             'velocity/inputFile']
+    # each part is satisfied by any one of its forms: legacy raw offsets and
+    # fits, or the GeoTIFF offsets (.vrt) and YAML fits of newer frames
+    parts = [['azimuth.offsets', 'azimuth.offsets.vrt'],
+             ['range.offsets', 'range.offsets.vrt'], ['geodat3x3.in'],
+             ['motion/baseline.3x3'], ['motion/az.est', 'motion/az.est.yaml'],
+             ['motion/rBaseline', 'motion/rBaseline.yaml'],
+             ['velocity/inputFile']]
     for offDir in offDirsUse:
         for part in parts:
             for myDir in offDir["dir"]:
-                if not os.path.exists(f'{myDir}/{part}'):
-                    u.myerror(f'{offDir["dir"]} missing {part} for date '
-                              f'{offDir["date"]}')
+                if not any(os.path.exists(f'{myDir}/{x}') for x in part):
+                    u.myerror(f'{offDir["dir"]} missing {" or ".join(part)} '
+                              f'for date {offDir["date1"]}')
 
 
 def computeNominalTimes(offDirsUse):
