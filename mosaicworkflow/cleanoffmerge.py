@@ -268,7 +268,14 @@ def main():
 
     #
     # filter offsets from hand cleaning
+    # badoffsets_poly.list (cleanpoly.py) supersedes badoffsets_poly.idl
+    if os.path.exists('badoffsets_poly.list'):
+        bad = np.fromfile('badoffsets_poly.list', dtype=np.dtype('u4'))
+        print('removing ', len(bad), ' polygon offsets ')
+        off.removeList(bad)
     for badType, badKey in zip(['_poly', '_auto'], ['idel_poly', 'iauto']):
+        if badType == '_poly' and os.path.exists('badoffsets_poly.list'):
+            continue
         if os.path.exists(f'badoffsets{badType}.idl'):
             bad = io.readsav(f'badoffsets{badType}.idl')
             try:
