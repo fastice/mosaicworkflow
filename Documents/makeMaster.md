@@ -76,6 +76,7 @@ of its 30 tracks tied).
 | `checkIonosphere` | `false` | baseline ↔ `range.offsets` VRT consistency |
 | `groupComment` | `null` | `track` emits `; track-N`, `file` emits `; <basename>` |
 | `frameStatPattern` | `null` | e.g. `track-*/*_0???/motion`, for the frame count |
+| `firstDate` | `null` | keep only pairs whose reference date — the `Date` property of the `.geojson` geodat — is on or after this (`YYYY-MM-DD`); an error on a source whose geodats are not `.geojson`. Used to splice NISAR into the Sentinel-1 master from 2026-06-17 |
 
 ### Output keys
 
@@ -104,7 +105,9 @@ A data line is dropped, and counted in the summary, if:
 - with `checkIonosphere`, the range baseline's `offsetCorrectionFile` disagrees
   with the `range.offsets` VRT's `ionosphereRangeOffsetCorrection` metadata —
   the consistency `mosaic3d`/`checkForIonosphereCorrection()` aborts on at
-  runtime, so the line is caught here instead of failing the mosaic.
+  runtime, so the line is caught here instead of failing the mosaic;
+- with `firstDate`, the pair starts before it (counted separately, printed under
+  the source's row in the summary).
 
 `--verbose` lists every dropped path. `--check` runs everything and prints the
 summary without writing any file.

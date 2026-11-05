@@ -28,12 +28,13 @@ Release/masterInput/createMaster.ipynb notebook.
 """
 
 import argparse
+import json
 import os
 import re
 import sys
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import date, datetime
 from functools import lru_cache
 
 import utilities as u
@@ -69,6 +70,8 @@ SOURCEDEFAULTS = {
     'checkIonosphere': False,   # baseline <-> range.offsets VRT consistency
     'groupComment': None,       # None | track | file
     'frameStatPattern': None,   # e.g. 'track-*/*_0???/motion'
+    'firstDate': None,          # keep only pairs whose reference date (geodat .geojson
+                                # 'Date') is on or after this, e.g. 2026-06-17
 }
 
 #
@@ -228,6 +231,13 @@ def resolveSources(config):
             if not files:
                 sys.exit(f'{name}: layout verbatim needs file or files')
             source['files'] = [anchorPath(f, configDir) for f in files]
+        if source['firstDate'] is not None:
+            # YAML reads an unquoted 2026-06-17 as a date, a quoted one as a str
+            try:
+                source['firstDate'] = date.fromisoformat(str(source['firstDate']))
+            except ValueError:
+                sys.exit(f'{name}: firstDate must be YYYY-MM-DD, got '
+                         f'{source["firstDate"]}')
         sources[name] = source
     return sources
 
@@ -553,6 +563,26 @@ def isExcluded(fields, source):
     return os.path.exists(os.path.join(path, marker))
 
 
+@lru_cache(maxsize=None)
+def geodatDate(geodatPath):
+    '''Reference date of a pair from its .geojson geodat ('Date' property).
+    Only .geojson geodats (NISAR) carry it; firstDate on any other source is
+    an error rather than a silent pass.'''
+    if not geodatPath.endswith('.geojson'):
+        u.myerror(f'firstDate needs .geojson geodats, got {geodatPath}')
+    with open(geodatPath) as fp:
+        data = json.load(fp)
+    properties = data.get('properties') or data['features'][0]['properties']
+    return date.fromisoformat(properties['Date'][:10])
+
+
+def isBeforeFirstDate(fields, source):
+    '''True if the source has a firstDate and this pair starts before it.'''
+    if source['firstDate'] is None:
+        return False
+    return geodatDate(fields[FIELDKEYS.index('geodat')]) < source['firstDate']
+
+
 def fileTypeLabel(path):
     '''Categorise a missing file path into a short human-readable label.'''
     base = os.path.basename(path)
@@ -590,7 +620,7 @@ def newStats():
             'nTrackEntries': 0, 'skipCounts': Counter(),
             'skipFiles': defaultdict(list), 'mismatchMsgs': [],
             'tracksNoInputFile': [], 'excludedDirs': [], 'fileTimes': [],
-            'framesInOutput': set(), 'nKept': 0}
+            'framesInOutput': set(), 'nKept': 0, 'nBeforeFirstDate': 0}
 
 
 def collectSource(source, workers, verbose):
@@ -618,6 +648,9 @@ def collectSource(source, workers, verbose):
                         index = FIELDKEYS.index('geodat')
                         stats['excludedDirs'].append(
                             os.path.dirname(fields[index]))
+                    continue
+                if isBeforeFirstDate(fields, source):
+                    stats['nBeforeFirstDate'] += 1
                     continue
                 kept.append((raw, fields))
             if executor is not None and kept:
@@ -756,7 +789,7 @@ def mergeStats(statsList):
     total = newStats()
     for stats in statsList:
         for key in ['nTotal', 'nSkipped', 'nExcluded', 'nMismatch',
-                    'nTrackEntries', 'nKept']:
+                    'nTrackEntries', 'nKept', 'nBeforeFirstDate']:
             total[key] += stats[key]
         total['skipCounts'].update(stats['skipCounts'])
         for label, paths in stats['skipFiles'].items():
@@ -778,6 +811,9 @@ def printSourceSummary(sources, collected, verbose):
         print(f'{name:<16} {nFiles:>6} {stats["nTotal"]:>8} '
               f'{stats["nKept"]:>8} {stats["nExcluded"]:>9} '
               f'{stats["nSkipped"]:>8}')
+        if stats['nBeforeFirstDate']:
+            print(f'  {stats["nBeforeFirstDate"]} pairs before firstDate '
+                  f'{source["firstDate"]} left out')
         if stats['tracksNoInputFile']:
             print(f'  {len(stats["tracksNoInputFile"])} of '
                   f'{stats["nTrackEntries"]} tracks have no inputFile'
