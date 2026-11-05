@@ -102,6 +102,11 @@ def getDirs(dirArgs):
         for myDir in sorted(glob.glob(myArg)) if any(
                 c in myArg for c in '*?[') else [myArg]:
             myDir = os.path.abspath(myDir.rstrip('/'))
+            # a region dir (e.g. berns) expands to its track-*/* frames
+            frames = sorted(glob.glob(f'{myDir}/track-*/*/velocity'))
+            if len(frames) > 0:
+                dirs += [(v, os.path.dirname(v)) for v in frames]
+                continue
             if os.path.isdir(f'{myDir}/velocity'):
                 myDir = f'{myDir}/velocity'
             if not os.path.isdir(myDir):
