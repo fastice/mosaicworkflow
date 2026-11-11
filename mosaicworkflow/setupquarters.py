@@ -349,7 +349,7 @@ def processFlags(args, template):
     # Dates
     for flag in ['firstdate', 'lastdate', 'noTSX', 'noCull', 'check',
                  'timeOverlapOff', 'noReprocess', 'noLabel', 'metaOnly', 'nThreads',
-                 'refDateSelect', 'overlapSelect', 'compactOutputs']:
+                 'refDateSelect', 'overlapSelect', 'compactOutputs', 'noKeepTiff']:
         if flag in args:
             flags[flag] = getattr(args, flag)
         else:
@@ -371,6 +371,14 @@ def processFlags(args, template):
         for flag in ['-GTiff', '-tiffPredictor']:
             if flag not in template['baseFlags'].split():
                 template['baseFlags'] += f' {flag} '
+    # keepTiff: false (template) or --noKeepTiff: drop tiff/ after the release is built
+    flags['keepTiff'] = not (flags['noKeepTiff'] or template.get('keepTiff', True) is False)
+    # threeDMask (CLI > template): mosaic3d -threeDMask, 3D solve inside the mask (hopper3D)
+    threeDMask = getattr(args, 'threeDMask', None) or template.get('threeDMask')
+    if threeDMask and '-threeDMask' not in template['baseFlags'].split():
+        if not os.path.exists(threeDMask):
+            u.myerror(f'processFlags: threeDMask {threeDMask} does not exist')
+        template['baseFlags'] += f' -threeDMask {threeDMask} '
     template = resolveSepAscDesc(template, args.template)
     template = resolveUseSquint(template, args.template,
                                 getattr(args, 'useSquint', False))
@@ -533,6 +541,13 @@ def processQArgs():
                         help='mosaic3d writes compressed GeoTIFF pieces and mask/interp/tiff run as '
                         'one in-memory step (no masked/ or interp/); same release values. '
                         'Also template key compactOutputs: true')
+    parser.add_argument('-noKeepTiff', '--noKeepTiff', action='store_true', default=False,
+                        help='Delete the per-sector tiff/ directory once the release is built '
+                        '(rebuildable from pieces/ with --noReprocess). Also template key '
+                        'keepTiff: false')
+    parser.add_argument('--threeDMask', type=str, default=None,
+                        help='Region mask GeoTIFF for mosaic3d -threeDMask (3D solve inside it); '
+                        'overrides template key threeDMask')
     parser.add_argument('--nThreads', type=int, default=24,
                         help='max number of parallel sector threads (default 24)')
     #
@@ -1915,6 +1930,21 @@ def processSectors(template, flags, outDir, dataTakes, lsCulledFile):
 # ----------------------------------------------------------------------------
 
 
+class ShapeOutputsThread(threading.Thread):
+    ''' makeShapeOutputs in the background; an exception is kept for the caller '''
+
+    def __init__(self, outDir, firstDate, lastDate):
+        super().__init__()
+        self.args = (outDir, firstDate, lastDate)
+        self.error = None
+
+    def run(self):
+        try:
+            makeShapeOutputs(*self.args)
+        except BaseException as e:  # incl. SystemExit from u.myerror
+            self.error = e
+
+
 def main():
     '''Set up mosaic files, makes directories if needed, produces all files,
     and can run with runAll '''
@@ -1959,6 +1989,13 @@ def main():
     threads, piecesFiles, piecesGeodats, stdouts, stderrs, sectorFailures = \
         processSectors(template, flags, outDir, dataTakes, lsCulledFile)
     #
+    # The meta shapefiles depend only on the sector inputFiles and lsData written
+    # above, so build them in the background while mosaic3d runs (joined below).
+    shapeThread = None
+    if not flags['noReprocess'] and not flags['metaOnly']:
+        shapeThread = ShapeOutputsThread(outDir, flags['firstdate'], flags['lastdate'])
+        shapeThread.start()
+    #
     # Run threads if noReprocess=False and not metaOnly
     if not flags['noReprocess'] and not flags['metaOnly']:
         u.runMyThreads(threads, maxThreads, 'sector vel')
@@ -1999,8 +2036,13 @@ def main():
         # makevrts
         makeQVRTSs(piecesFiles, outDir, template)
         #
-    # makeshapes (meta files with frame locations)
-    makeShapeOutputs(outDir, flags['firstdate'], flags['lastdate'])
+    # makeshapes (meta files with frame locations); already running if started above
+    if shapeThread is None:
+        makeShapeOutputs(outDir, flags['firstdate'], flags['lastdate'])
+    else:
+        shapeThread.join()
+        if shapeThread.error is not None:
+            raise shapeThread.error
     # make final output
     shapeFileNames = makeFinalOutput(outDir, template, flags)
     #
@@ -2025,6 +2067,23 @@ def main():
         if preMetFile is not None:
             print(preMetFile)
             makeSpatial(outDir, preMetFile.replace('premet', 'spo'), template)
+    #
+    # keepTiff false: the per-sector tiffs/VRTs only fed the release, which is now built
+    if not flags['keepTiff'] and not flags['metaOnly']:
+        removeTiffDir(outDir)
+
+
+def removeTiffDir(outDir):
+    ''' remove the files tiff/ holds (per-sector tifs, aux.xml, VRTs) and the dir '''
+    tiffDir = f'{outDir}/tiff'
+    if not os.path.isdir(tiffDir):
+        return
+    for pattern in ['*.tif', '*.tif.aux.xml', '*.vrt']:
+        for f in glob.glob(f'{tiffDir}/{pattern}'):
+            os.remove(f)
+    if len(os.listdir(tiffDir)) == 0:
+        os.rmdir(tiffDir)
+    print(f'Removed {tiffDir} (keepTiff false)')
 
 
 if __name__ == "__main__":
