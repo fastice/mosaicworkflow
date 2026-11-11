@@ -14,11 +14,21 @@ RA mode (--doRA):   range and azimuth are tested independently.
     Azimuth outliers → badoffsets_auto.list.da
 
 Run from the track-N/ directory.
+
+Each product gets a summary appended to its velFile.report when cleaning
+finishes: how much it had to begin with, how much was cleaned, how much is
+left, the mean/median departure from the reference, the coverage of the
+culled+interpolated offsets the product starts from, and a one-word status
+(OK / SPARSE / NEARLY-EMPTY / EMPTY).  The file's first line is unchanged.
+
+Note that products carrying an Exclude.pending marker are skipped, so their
+masks stay frozen at whatever the last non-pending run produced.
 """
 import argparse
 import yaml
 import utilities as u
 import numpy as np
+import re
 import os
 from subprocess import call
 import scipy.ndimage as morph
@@ -92,6 +102,11 @@ def autocleanProcessArgs():
                         help='Use the nocull stats instead of culled [False]')
     parser.add_argument('-refresh', '--refresh', action='store_true',
                         help='Overwrite existing bad-offset lists [False]')
+    parser.add_argument('-reportOnly', '--reportOnly', action='store_true',
+                        help='Write velFile.report from the bad-offset lists '
+                             'already on disk; compute and write nothing else. '
+                             'Includes Exclude.pending products, which a normal '
+                             'run skips [False]')
     parser.add_argument('-remove', '--remove', action='store_true',
                         help='Remove prior bad-offset lists and exit [False]')
     parser.add_argument('-applyall', '--applyall', action='store_true',
@@ -122,6 +137,9 @@ def autocleanProcessArgs():
 
     if args.applyall and args.noapply:
         u.myerror('--applyall and --noapply are mutually exclusive')
+    if args.reportOnly and (args.refresh or args.remove or args.applyall):
+        u.myerror('--reportOnly cannot be combined with --refresh, --remove '
+                  'or --applyall: it must not change anything')
     if args.firstDate > args.lastDate:
         u.myerror(f'firstDate ({args.firstDate}) > lastDate ({args.lastDate})')
 
@@ -140,7 +158,8 @@ def autocleanProcessArgs():
 
     return (args.nocull, args.refresh, args.applyall, args.noapply,
             args.sigThresh, dems, args.threads, args.offDir,
-            args.firstDate, args.lastDate, args.remove, regionDef, doRA)
+            args.firstDate, args.lastDate, args.remove, regionDef, doRA,
+            args.reportOnly)
 
 
 def getDems(dem, regionDef):
@@ -200,8 +219,13 @@ def getVelRef(noCull, epsg, wktFile, framePrefix='', doRA=False):
     return means, sigmas, ranges
 
 
-def getOffsetDirs(noCull, offDirRoot):
-    """Return offset dirs that have azimuth.offsets and no Exclude file."""
+def getOffsetDirs(noCull, offDirRoot, keepPending=False):
+    """Return offset dirs that have azimuth.offsets and no Exclude file.
+
+    keepPending retains Exclude.pending products.  A normal run must skip them
+    -- which is also why their masks freeze at whatever the last non-pending
+    run produced -- but a report wants exactly those.
+    """
     offs = u.globOffsetProducts(f'{offDirRoot}/azimuth.offsets')
     if len(offs) < 1:
         u.myerror('no *_*/azimuth.offsets: in track-XXX dir?')
@@ -209,8 +233,9 @@ def getOffsetDirs(noCull, offDirRoot):
     offDirs = []
     for off in offs:
         d = off.replace('/azimuth.offsets', '')
+        pending = os.path.exists(f'{d}/Exclude.pending')
         if (not os.path.exists(f'{d}/Exclude') and
-                not os.path.exists(f'{d}/Exclude.pending') and
+                (keepPending or not pending) and
                 os.path.exists(f'{d}/{velFile}')):
             offDirs.append(d)
         else:
@@ -339,6 +364,30 @@ def cleanMaskEdges(maskb, kernel1):
     return maskbOpen, edgePoints
 
 
+def diffStatsFor(names, diffs, sigmas, goodpoints):
+    """Per-component (name, meanAbs, medianAbs, signedMedian, biasInSigma).
+
+    The signed median is the one that matters.  A frame whose baseline was fit
+    from a handful of tiepoints comes out DISPLACED, not noisy: a couple of bad
+    tiepoints bias the fit, the whole field sits off the reference by a near
+    constant, and every pixel then trips the sigThresh*sigma test at once --
+    cleaning strips the product for a fit error rather than a data error.
+    Scatter and bias are indistinguishable in the absolute difference, which is
+    all this report used to carry.
+    """
+    out = []
+    if not np.any(goodpoints):
+        return out
+    for name, d, sig in zip(names, diffs, sigmas):
+        v = d[goodpoints]
+        med = float(np.median(v))
+        s = float(np.median(sig[goodpoints]))
+        out.append((name, float(np.average(np.abs(v))),
+                    float(np.median(np.abs(v))), med,
+                    med / s if s else float('nan')))
+    return out
+
+
 def makeDiffMask(vel, goodpoints, fpReport, mean, sigma, edgePoints,
                  sigThresh2D, kernel1):
     """XY mode: return one closed mask combining vx and vy outliers + edges."""
@@ -358,8 +407,15 @@ def makeDiffMask(vel, goodpoints, fpReport, mean, sigma, edgePoints,
     badpoints = np.logical_or(badpoints, edgePoints)
     mask = np.zeros(vel.vx.shape, dtype=np.byte)
     mask[badpoints] = 1
+    sx = np.zeros(vel.vx.shape)
+    sy = np.zeros(vel.vx.shape)
+    sx[goodpoints] = vel.vx[goodpoints] - mean.vx[goodpoints]
+    sy[goodpoints] = vel.vy[goodpoints] - mean.vy[goodpoints]
+    stats = diffStatsFor(('dx', 'dy'), (sx, sy), (sigma.ex, sigma.ey),
+                         goodpoints)
     return morph.binary_erosion(
-        morph.binary_dilation(mask, structure=kernel1), structure=kernel1)
+        morph.binary_dilation(mask, structure=kernel1),
+        structure=kernel1), stats
 
 
 def makeDiffMasksRA(vel, goodpoints, fpReport, mean, sigma, edgePoints,
@@ -384,7 +440,187 @@ def makeDiffMasksRA(vel, goodpoints, fpReport, mean, sigma, edgePoints,
 
     badR = np.logical_or(dr > sigThresh2D * sigma.er, edgePoints)
     badA = np.logical_or(da > sigThresh2D * sigma.ea, edgePoints)
-    return _closeMask(badR), _closeMask(badA)
+    sr = np.zeros(vel.vr.shape)
+    sa = np.zeros(vel.va.shape)
+    sr[goodpoints] = vel.vr[goodpoints] - mean.vr[goodpoints]
+    sa[goodpoints] = vel.va[goodpoints] - mean.va[goodpoints]
+    stats = diffStatsFor(('dr', 'da'), (sr, sa), (sigma.er, sigma.ea),
+                         goodpoints)
+    return _closeMask(badR), _closeMask(badA), stats
+
+
+def offsetsLoss(offDir, badIndex):
+    """What the bad-point list costs in the OFFSETS domain, as
+    {component: (original, cleaned, left, gridPx)}.
+
+    This is the number that matters.  A product starts from its culled+
+    interpolated .dr/.da rasters and what mosaic3d finally reads is those
+    minus the bad-point list, so cleaning is measured against `original` --
+    not against the velocity grid, which spans the whole velocityStats box and
+    makes every single frame look like a rounding error.
+
+    `badIndex` maps a component to the flat indices written for it (in XY mode
+    the one list applies to both).  The indices are intersected with the valid
+    pixels, because the 3x3 dilation that builds them also lands on no-data
+    pixels -- so the list is routinely longer than the data it removes.
+    Returns {} if nothing can be read.
+    """
+    try:
+        from osgeo import gdal
+    except Exception:
+        return {}
+    out = {}
+    for comp in ['dr', 'da']:
+        files = [f for f in glob.glob(f'{offDir}/*.offsets.cull.interp.{comp}.vrt')
+                 if 'register' not in os.path.basename(f)]
+        if len(files) < 1:
+            continue
+        try:
+            # keep the dataset referenced: a band outlives its dataset only
+            # as long as something holds the dataset, else gdal throws on use
+            ds = gdal.Open(files[0])
+            band = ds.GetRasterBand(1)
+            data = band.ReadAsArray()
+            noData = band.GetNoDataValue()
+            good = np.isfinite(data) if noData is None else data != noData
+            original = int(np.count_nonzero(good))
+            cleaned = 0
+            idx = badIndex.get(comp)
+            if idx is not None and len(idx) > 0:
+                flat = good.reshape(-1)
+                inRange = idx[(idx >= 0) & (idx < flat.size)]
+                cleaned = int(np.count_nonzero(flat[inRange]))
+            out[comp] = (original, cleaned, original - cleaned, int(data.size))
+        except Exception as e:
+            u.mywarning(f'could not measure {files[0]} for the report: {e}')
+    return out
+
+
+def readExistingList(offDir, doRA):
+    """The bad-offset indices already on disk, as {component: array}."""
+    out = {}
+    pairs = [('dr', '.dr'), ('da', '.da')] if doRA else [('dr', ''), ('da', '')]
+    for comp, suffix in pairs:
+        f = f'{offDir}/badoffsets_auto.list{suffix}'
+        if os.path.exists(f):
+            try:
+                out[comp] = np.fromfile(f, dtype=np.int32)
+            except Exception as e:
+                u.mywarning(f'could not read {f}: {e}')
+    return out
+
+
+def readFitTiepoints(offDir):
+    """(nUsed, sigma) from the range baseline fit, or (None, None)."""
+    for name in ('rBaseline.deltabp.yaml', 'rBaseline.yaml'):
+        f = f'{offDir}/motion/{name}'
+        if not os.path.exists(f):
+            continue
+        try:
+            t = open(f).read()
+            n = re.search(r'^nTiepointsUsed:\s*(\d+)', t, re.M)
+            g = re.search(r'^sigma:\s*([-\d.eE+]+)', t, re.M)
+            return (int(n.group(1)) if n else None,
+                    float(g.group(1)) if g else None)
+        except Exception:
+            return None, None
+    return None, None
+
+
+def cleanStatus(left, original):
+    """One-word verdict on what survives, as a fraction of what the product
+    originally had -- never of the grid."""
+    if left < 1:
+        return 'EMPTY'
+    if not original:
+        return 'UNKNOWN'
+    pct = 100. * left / original
+    if pct < 1.:
+        return 'NEARLY-EMPTY'
+    if pct < 25.:
+        return 'SPARSE'
+    return 'OK'
+
+
+def writeCleanReport(fpReport, offDir, doRA, sigThresh, counts, components,
+                     diffStats, offLoss, reportOnly=False):
+    """Append a per-product summary of what cleaning removed.
+
+    The file's first line is left as it was (the mean |dx|/|dy|), so anything
+    reading it by position still works; this block goes after it.
+    """
+    valid, withRef = counts['valid'], counts['withRef']
+
+    def pct(n, d):
+        return f'{100. * n / d:5.1f}%' if d else '  n/a'
+
+    print(f'\n# autoclean summary  {datetime.now():%Y-%m-%d %H:%M:%S}',
+          file=fpReport)
+    print(f'product          : {os.path.basename(os.path.normpath(offDir))}',
+          file=fpReport)
+    print(f'mode             : {"RA" if doRA else "XY"}'
+          f'{"  (reportOnly: measured from the lists on disk)" if reportOnly else ""}',
+          file=fpReport)
+    print(f'sigThresh        : {sigThresh}', file=fpReport)
+
+    # what cleaning costs, against the cull.interp product it starts from
+    fractions = []
+    for comp, (orig, cleaned, left, gridPx) in sorted(offLoss.items()):
+        fractions.append((left, orig))
+        print(f'offsets .{comp}      : original {orig:>9d} px valid '
+              f'({pct(orig, gridPx)} of the {gridPx} px offsets grid)',
+              file=fpReport)
+        print(f'  cleaned        : {cleaned:>9d} ({pct(cleaned, orig)} of '
+              'original)', file=fpReport)
+        print(f'  left           : {left:>9d} ({pct(left, orig)} of original)',
+              file=fpReport)
+    # why those points went: the decision itself is made on the velocity grid
+    print('why              :', file=fpReport)
+    for name, _, _, nList in components:
+        print(f'  badList {name:<7s}: {nList:>9d} indices written (3x3 '
+              'dilated, so more than it removes)', file=fpReport)
+    if valid < 1:
+        print('  velocity       : EMPTY -- no solution for this frame, so no '
+              'bias can be measured; any list on disk predates that',
+              file=fpReport)
+    else:
+        print(f'  noReference    : {valid - withRef:>9d} of {valid} solved px '
+              '-- no reference, cannot be checked', file=fpReport)
+        print(f'  raggedEdge     : {counts["edge"]:>9d} of {valid} solved px '
+              '-- always removed', file=fpReport)
+    worstBias = 0.
+    for name, meanAbs, medAbs, signed, biasSig in diffStats:
+        print(f'  absDiff {name:<6s} : mean {meanAbs:9.3f}  median {medAbs:9.3f}'
+              '  (m/yr vs reference)', file=fpReport)
+        print(f'  bias    {name:<6s} : median signed {signed:9.3f} m/yr '
+              f'({biasSig:+5.1f} sigma)', file=fpReport)
+        if np.isfinite(biasSig):
+            worstBias = max(worstBias, abs(biasSig))
+    nTie, fitSigma = readFitTiepoints(offDir)
+    if nTie is not None:
+        print(f'  rangeFit       : {nTie} tiepoints, sigma {fitSigma}',
+              file=fpReport)
+    if worstBias >= 1.:
+        print(f'  WARNING        : the field is displaced {worstBias:.1f} sigma '
+              'from the reference -- a fit error, not a data error, biases every '
+              'pixel past sigThresh at once and strips the product',
+              file=fpReport)
+
+    if fractions:
+        left, orig = min(fractions, key=lambda p: p[0] / p[1] if p[1] else 0.)
+        status = cleanStatus(left, orig)
+    elif reportOnly:
+        # legacy product: no cull.interp vrt to measure against, and reportOnly
+        # computes no mask of its own, so there is nothing to judge -- saying
+        # EMPTY here would libel every pre-tiff product
+        print('  offsetsLoss    : not measurable (no cull.interp vrt -- legacy '
+              'product)', file=fpReport)
+        status = 'UNKNOWN'
+    else:  # offsets rasters unreadable -- fall back to the velocity grid
+        left, orig = min(((lf, valid) for _, _, lf, _ in components),
+                         default=(0, valid))
+        status = cleanStatus(left, orig)
+    print(f'status           : {status}', file=fpReport)
 
 
 def computeBadRA(mask1, vel, geodatFile, dem, offDir):
@@ -433,18 +669,28 @@ def writeIndexList(offDir, raIndex, suffix=''):
 
 
 def _writeMaskIfBad(mask, vel, geodatFile, dem, offDir, suffix):
-    """Helper: convert mask → r/a → RA index → write list. Returns True if any bad points."""
+    """Helper: convert mask → r/a → RA index → write list.
+
+    Returns the indices written, or None if there were no bad points -- the
+    report intersects them with the valid offsets pixels to say what cleaning
+    actually costs.
+    """
     r, a = computeBadRA(mask, vel, geodatFile, dem, offDir)
     if r[0] is not None:
         raIndex = makeRAMask(offDir, r, a)
         writeIndexList(offDir, raIndex, suffix=suffix)
-        return True
-    return False
+        return raIndex
+    return None
 
 
 def processOffsets(offDir, noCull, mean, sigma, sigThresh, sigShape, dem, epsg,
-                   wktFile, sensorInfo, doRA=False):
-    """Compute and write bad-offset mask(s) for one directory."""
+                   wktFile, sensorInfo, doRA=False, reportOnly=False):
+    """Compute and write bad-offset mask(s) for one directory.
+
+    With reportOnly, nothing is computed or written but the report: the bad
+    point lists already on disk are read back and measured, so the numbers
+    describe the cleaning the products actually carry.
+    """
     result = getVelAndFiles(offDir, epsg, wktFile, noCull, mean, sensorInfo, doRA)
     if result is False:
         return False
@@ -453,23 +699,68 @@ def processOffsets(offDir, noCull, mean, sigma, sigThresh, sigShape, dem, epsg,
     maskb, goodpoints, kernel1 = makeInitialCullMask(vel, mean, doRA)
     maskbClose, edgePoints = cleanMaskEdges(maskb, kernel1)
 
-    if doRA:
-        maskR, maskA = makeDiffMasksRA(vel, goodpoints, fpReport, mean, sigma,
-                                       edgePoints, sigThresh2D, kernel1)
+    counts = {'total': int(maskb.size),
+              'valid': int(np.count_nonzero(maskb)),
+              'withRef': int(np.count_nonzero(goodpoints)),
+              'edge': int(np.count_nonzero(edgePoints))}
+
+    # count both against the valid pixels only: the closed mask spreads past
+    # the data edge under dilation, so a raw mask.sum() can exceed the number
+    # of pixels the product ever had.  cleaned + left == goodAtStart this way.
+    def _cleaned(mask):
+        return int(np.count_nonzero(np.logical_and(maskb > 0, mask > 0)))
+
+    def _left(mask):
+        return int(np.count_nonzero(np.logical_and(maskb > 0, mask < 1)))
+
+    if reportOnly:
+        badIndex = readExistingList(offDir, doRA)
+        diffStats = diffStatsFor(
+            ('dr', 'da') if doRA else ('dx', 'dy'),
+            [getattr(vel, a) - getattr(mean, a) for a in
+             (('vr', 'va') if doRA else ('vx', 'vy'))],
+            (sigma.er, sigma.ea) if doRA else (sigma.ex, sigma.ey),
+            goodpoints)
+        components = [(c, 0, 0, len(v)) for c, v in sorted(badIndex.items())]
+        if not doRA:        # one list covers the product; report it once
+            components = components[:1]
+            if components:
+                components = [('offsets', 0, 0, components[0][3])]
+    elif doRA:
+        maskR, maskA, diffStats = makeDiffMasksRA(vel, goodpoints, fpReport,
+                                                  mean, sigma, edgePoints,
+                                                  sigThresh2D, kernel1)
         if debug:
             u.writeImage('testBadR', maskR, 'u1')
             u.writeImage('testBadA', maskA, 'u1')
-        _writeMaskIfBad(maskR, vel, geodatFile, dem, offDir, suffix='.dr')
-        _writeMaskIfBad(maskA, vel, geodatFile, dem, offDir, suffix='.da')
+        idxR = _writeMaskIfBad(maskR, vel, geodatFile, dem, offDir, suffix='.dr')
+        idxA = _writeMaskIfBad(maskA, vel, geodatFile, dem, offDir, suffix='.da')
+        badIndex = {'dr': idxR, 'da': idxA}
+        components = [('range', _cleaned(maskR), _left(maskR),
+                       0 if idxR is None else len(idxR)),
+                      ('azimuth', _cleaned(maskA), _left(maskA),
+                       0 if idxA is None else len(idxA))]
     else:
-        mask1 = makeDiffMask(vel, goodpoints, fpReport, mean, sigma,
-                             edgePoints, sigThresh2D, kernel1)
+        mask1, diffStats = makeDiffMask(vel, goodpoints, fpReport, mean, sigma,
+                                        edgePoints, sigThresh2D, kernel1)
         if debug:
             u.writeImage('testBad1', mask1, 'u1')
+        raIndex = None
         r, a = computeBadRA(mask1, vel, geodatFile, dem, offDir)
         if r[0] is not None:
             raIndex = makeRAMask(offDir, r, a)
             writeIndexList(offDir, raIndex)
+        # one list covers the whole product in XY mode, so it applies to both
+        badIndex = {'dr': raIndex, 'da': raIndex}
+        components = [('offsets', _cleaned(mask1), _left(mask1),
+                       0 if raIndex is None else len(raIndex))]
+
+    try:
+        writeCleanReport(fpReport, offDir, doRA, sigThresh, counts, components,
+                         diffStats, offsetsLoss(offDir, badIndex),
+                         reportOnly=reportOnly)
+    except Exception as e:
+        u.mywarning(f'could not write the autoclean summary for {offDir}: {e}')
 
     fpReport.close()
     return True
@@ -501,12 +792,12 @@ def _removeList(offDir, doRA):
 def main():
     """Flag outlier offsets by comparison with velocityStats reference."""
     noCull, refresh, applyFlag, noapply, sigThresh, dems, nThreads, \
-        offDirRoot, firstDate, lastDate, remove, regionDef, doRA = \
-        autocleanProcessArgs()
+        offDirRoot, firstDate, lastDate, remove, regionDef, doRA, \
+        reportOnly = autocleanProcessArgs()
 
     framePrefix = getFramePrefix()
 
-    offDirs = getOffsetDirs(noCull, offDirRoot)
+    offDirs = getOffsetDirs(noCull, offDirRoot, keepPending=reportOnly)
     print(f'Number of products culled {len(offDirs)}')
     sensor = getSensor()
     print(sensor)
@@ -534,7 +825,17 @@ def main():
         try:
             frameStr = offDir.split('_')[-1][len(framePrefix):]
             frame = checkFrame(int(frameStr), ranges)
-            if refresh or not _listExists(offDir, doRA):
+            if reportOnly:
+                if not _listExists(offDir, doRA):
+                    skip += 1          # nothing cleaned yet: nothing to report
+                else:
+                    threads.append(threading.Thread(
+                        target=processOffsets,
+                        args=[offDir, noCull, means[frame], sigmas[frame],
+                              readSigThresh(offDir, sigThresh), sigShape,
+                              getDem(dems, myGeo.datetime), epsg, wktFile,
+                              sensorInfo, doRA, True]))
+            elif refresh or not _listExists(offDir, doRA):
                 new = True
                 sigThreshUse = readSigThresh(offDir, sigThresh)
                 dem = getDem(dems, myGeo.datetime)
@@ -553,11 +854,20 @@ def main():
             u.mywarning('\033[1;31mError processing \033[0m ' + offDir)
 
     if skip > 0:
-        u.myalert(f'Skipped {skip} products because --refresh not set and '
-                  'bad-offset list(s) exist')
+        if reportOnly:
+            u.myalert(f'Skipped {skip} products with no bad-offset list')
+        else:
+            u.myalert(f'Skipped {skip} products because --refresh not set and '
+                      'bad-offset list(s) exist')
 
     if len(threads) > 0:
-        u.runMyThreads(threads, nThreads, 'Making Masks')
+        u.runMyThreads(threads, nThreads,
+                       'Reports' if reportOnly else 'Making Masks')
+
+    if reportOnly:
+        print(f'reportOnly: wrote {len(threads)} velFile.report; '
+              'nothing else changed')
+        return
 
     if remove and not applyFlag:
         print('remove flag set: no further action')
