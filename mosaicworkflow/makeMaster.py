@@ -37,6 +37,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from functools import lru_cache
 
+import mosaicfunc as mosf
 import utilities as u
 import yaml
 from osgeo import gdal
@@ -760,6 +761,11 @@ def writeMaster(entries, output, check):
             if index < len(entries) - 1:
                 fp.write(';\n')
     print(f'Wrote {nData} data lines to {outFile}')
+    # Parquet sidecar with every data line + pair date: setupquarters reads it
+    # instead of the master and ~1 geodat per line; named by the master's content
+    # hash, so it is only ever used with this exact master
+    nCached = mosf.writeMasterParquet(outFile)
+    print(f'Wrote {nCached} lines with dates to {mosf.masterParquetName(outFile)}')
     return nData
 
 

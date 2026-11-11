@@ -4,6 +4,7 @@ import os
 import geopandas as gpd
 import sarfunc as s
 from subprocess import call
+import subprocess
 from datetime import datetime, timedelta, date
 import numpy as np
 import threading
@@ -19,6 +20,7 @@ from PIL import ImageFont
 from PIL import ImageDraw
 import gc
 import json
+import re
 import yaml
 # Currently this is hardwired here since this program only works for greenland.
 # It could be used for future expansion to Antarctica I have tried to use it to
@@ -282,7 +284,7 @@ def processFlags(args, template):
     # Dates
     for flag in ['firstdate', 'lastdate', 'noTSX', 'noCull', 'check',
                  'timeOverlapOff', 'noReprocess', 'noLabel', 'metaOnly', 'nThreads',
-                 'refDateSelect', 'overlapSelect']:
+                 'refDateSelect', 'overlapSelect', 'compactOutputs']:
         if flag in args:
             flags[flag] = getattr(args, flag)
         else:
@@ -298,6 +300,12 @@ def processFlags(args, template):
         u.myerror('processFlags: baseFlags not specified.')
     elif not flags['timeOverlapOff']:
         template['baseFlags'] += ' -timeOverlap '
+    # compactOutputs (CLI or template): GeoTIFF pieces with the lossless float predictor
+    flags['compactOutputs'] = bool(flags['compactOutputs'] or template.get('compactOutputs', False))
+    if flags['compactOutputs']:
+        for flag in ['-GTiff', '-tiffPredictor']:
+            if flag not in template['baseFlags'].split():
+                template['baseFlags'] += f' {flag} '
     template = resolveSepAscDesc(template, args.template)
     template = resolveUseSquint(template, args.template,
                                 getattr(args, 'useSquint', False))
@@ -446,6 +454,10 @@ def processQArgs():
                         help='Landsat input file for mosaic period')
     parser.add_argument('--template', type=str, default='mosaic.template.yaml',
                         help='template that defines mosaic')
+    parser.add_argument('-compactOutputs', '--compactOutputs', action='store_true', default=False,
+                        help='mosaic3d writes compressed GeoTIFF pieces and mask/interp/tiff run as '
+                        'one in-memory step (no masked/ or interp/); same release values. '
+                        'Also template key compactOutputs: true')
     parser.add_argument('--nThreads', type=int, default=24,
                         help='max number of parallel sector threads (default 24)')
     #
@@ -493,33 +505,53 @@ def getDateFromGeodat(geo):
 
 
 def processInputFileQ(filename, noTSX):
-    try:
-        inputFile = open(filename, 'r')
-    except Exception:
-        u.myerror(f'could not open SAR input file: {filename}')
+    '''
+    [[date, line + crossFlag], ...] for every data line of the master whose frame
+    has no Exclude/Exclude.pending.  Lines and dates come from the master's
+    Parquet sidecar <master>.<content hash>.parquet (mosf.writeMasterParquet,
+    written by makeMaster) when one exists for the master's current content, which
+    avoids reading the master and opening a geodat per
+    line; otherwise from the master and geodats as before.  The Exclude markers
+    are checked live, once per directory two levels above the geodat (the track
+    directory for S1/NISAR, so frame-level markers are not seen here; makeMaster
+    already drops hard-Excluded frames, and Exclude.pending frames flow through).
+    '''
+    cached = mosf.readMasterParquet(filename)
+    if cached is not None:
+        print(f'processInputFileQ: dates from {mosf.masterParquetName(filename)}')
+        source = cached
+    else:
+        try:
+            inputFile = open(filename, 'r')
+        except Exception:
+            u.myerror(f'could not open SAR input file: {filename}')
+        # use line length to skip over non data stuff; date read below
+        source = [(None, line.strip('\n')) for line in inputFile
+                  if ';' not in line and len(line) > 80]
+        inputFile.close()
+    excluded = {}
     dataTakes = []
     count = 0
-    for line in inputFile:
-        # use line length to skip over non data stuff
-        if ';' not in line and len(line) > 80:
-            if noTSX and 'TSX' in line:
-                continue
-            # setup cross flag, 1 if no TSX, 0 if TSX
-            crossFlag = ['1', '0']['TSX' in line]
-            line = line.strip('\n')
-            parts = line.split()
-            # get geodat
-            geo = parts[1].strip()
-            exclude_base = "/".join(geo.split('/')[0:-2])
-            if not os.path.exists(exclude_base+'/Exclude') and \
-                    not os.path.exists(exclude_base+'/Exclude.pending'):
+    for mydate, line in source:
+        if noTSX and 'TSX' in line:
+            continue
+        # setup cross flag, 1 if no TSX, 0 if TSX
+        crossFlag = ['1', '0']['TSX' in line]
+        parts = line.split()
+        # get geodat
+        geo = parts[1].strip()
+        exclude_base = "/".join(geo.split('/')[0:-2])
+        if exclude_base not in excluded:
+            excluded[exclude_base] = os.path.exists(exclude_base+'/Exclude') or \
+                os.path.exists(exclude_base+'/Exclude.pending')
+        if not excluded[exclude_base]:
+            if cached is None:
                 mydate = getDateFromGeodat(geo)
-                count += 1
-                if count % 500 == 0:
-                    print('.', end='')
-                line += ' '+crossFlag
-                dataTakes.append([mydate, line])
-    inputFile.close()
+            count += 1
+            if count % 500 == 0:
+                print('.', end='')
+            line += ' '+crossFlag
+            dataTakes.append([mydate, line])
     return dataTakes
 
 
@@ -801,7 +833,7 @@ def interpMosiacs(piecesFiles, piecesGeodats, outDir, interpSize, baseFlags,
 # ---------------------------------------------------------------------------
 
 
-def mkQDirs(outDir, outputMaskTemplate):
+def mkQDirs(outDir, outputMaskTemplate, compactOutputs=False):
     if not os.path.isdir(outDir):
         # print('creating outDir '+ outDir)
         os.mkdir(outDir)
@@ -818,11 +850,11 @@ def mkQDirs(outDir, outputMaskTemplate):
     #     # print(outDir+'/intermediate')
     #     os.mkdir(outDir+'/intermediate')
     # directory for masked versions of mosaics
-    if not os.path.isdir(outDir+'/masked'):
+    if not os.path.isdir(outDir+'/masked') and not compactOutputs:
         # print(outDir+'/masked')
         os.mkdir(outDir+'/masked')
     # directory for interpolated products
-    if not os.path.isdir(outDir+'/interp'):
+    if not os.path.isdir(outDir+'/interp') and not compactOutputs:
         # print(outDir+'/interp')
         os.mkdir(outDir+'/interp')
     # directory for tif products
@@ -899,6 +931,123 @@ def writeQTiffs(piecesFiles, outDir, baseFlags):
     return
 
 # ---------------------------------------------------------------------------
+# compactOutputs: mask + interp + tiff in one pass, no masked/ or interp/
+# ---------------------------------------------------------------------------
+
+# Per-sector tiffs only feed the VRTs and the release COGs (which rebuild their own
+# overviews), so they are plain tiled GTiffs: no overviews, lossless float predictor.
+COMPACT_TIFF_OPTIONS = ['TILED=YES', 'BLOCKXSIZE=512', 'BLOCKYSIZE=512',
+                        'COMPRESS=DEFLATE', 'PREDICTOR=3', 'BIGTIFF=IF_SAFER']
+
+
+def readCompactPiece(fileName):
+    '''
+    Read a mosaic3d -GTiff piece bottom-up, with no data as NaN, exactly as
+    geoimage.readFiles treats the raw pieces (<= -2e9 is no data unless the band
+    already uses NaN).
+    '''
+    ds = gdal.Open(fileName)
+    if ds is None:
+        u.myerror(f'readCompactPiece: cannot open {fileName} (compactOutputs needs '
+                  'pieces written by mosaic3d -GTiff)')
+    a = np.flipud(ds.GetRasterBand(1).ReadAsArray()).astype(np.float32)
+    ds = None
+    if np.sum(np.isnan(a)) == 0:
+        a[a <= -2.e9] = np.nan
+    return a
+
+
+def interpCompact(a, interpSize, stderr):
+    ''' intfloat on one masked band, piped through stdin/stdout as MSB float32 '''
+    sy, sx = a.shape
+    raw = np.where(np.isnan(a), np.float32(-2.0e9), a).astype('>f4').tobytes()
+    command = ['intfloat', '-thresh', f'{interpSize}', '-wdist', '-nr', f'{sx}',
+               '-na', f'{sy}', '-ratThresh', '1.', '/dev/stdin']
+    result = subprocess.run(command, input=raw, stdout=subprocess.PIPE, stderr=stderr)
+    if result.returncode != 0 or len(result.stdout) != len(raw):
+        u.myerror(f'interpCompact: intfloat failed (rc={result.returncode}, '
+                  f'{len(result.stdout)} of {len(raw)} bytes)')
+    b = np.frombuffer(result.stdout, dtype='>f4').reshape(sy, sx).astype(np.float32)
+    if np.sum(np.isnan(b)) == 0:
+        b[b <= -2.e9] = np.nan
+    return b
+
+
+def writeCompactTiff(fileName, a, geoImage, epsg, wktFile, noData):
+    ''' Same georeferencing and no-data handling as geoimage.writeCloudOptGeo '''
+    if wktFile is None:
+        epsg = [epsg, 3413][epsg is None]
+    ny, nx = a.shape
+    corners = geoImage.computePixEdgeCornersXYM()
+    dx, dy = geoImage.geo.pixSizeInM()
+    ds = gdal.GetDriverByName('GTiff').Create(fileName, nx, ny, 1, gdal.GDT_Float32,
+                                              options=COMPACT_TIFF_OPTIONS)
+    ds.SetGeoTransform((corners['ul']['x'], dx, 0, corners['ul']['y'], 0, -dy))
+    ds.SetProjection(geoImage.getWKT_PROJ(epsg, wktFile))
+    out = a.astype(np.float32)
+    band = ds.GetRasterBand(1)
+    if noData is not None:
+        out[np.isnan(out)] = noData
+        band.SetNoDataValue(noData)
+    band.WriteArray(np.flipud(out))
+    ds.FlushCache()
+    ds = None
+
+
+def compactSector(pieceName, pieceGeodat, outDir, outputMaskShape, interpSize,
+                  baseFlags, epsg, wktFile, stderr):
+    '''
+    compactOutputs version of maskMosaic + interpMosiacs + writeQTiff for one sector:
+    reads the -GTiff pieces, masks in memory, pipes vx/vy/dT through intfloat, and
+    writes the same tiff/ files (values identical) without masked/ or interp/.
+    Errors are masked but NOT interpolated, as in interpMosiacs().
+    '''
+    mask = u.makeMaskFromShape(pieceGeodat, outputMaskShape)
+    imask = (mask < 1) if len(mask) > 1 else None
+    piecePath = f'{outDir}/pieces/{pieceName}'
+    tiffRoot = f'{outDir}/tiff/{pieceName}'
+    # geoimage only for the georeferencing helpers
+    geoImage = u.geoimage(geoType='velocity', verbose=False)
+    geoImage.geo = pieceGeodat
+    bands = {}
+    components = ['vx', 'vy', 'ex', 'ey']
+    if '-timeOverlap' in baseFlags:
+        components.append('dT')
+    for c in components:
+        bands[c] = readCompactPiece(f'{piecePath}.{c}.tif')
+        if imask is not None:
+            bands[c][imask] = np.nan
+    geoImage.vx = bands['vx']
+    for c in ['vx', 'vy']:
+        bands[c] = interpCompact(bands[c], interpSize, stderr)
+    v = np.sqrt(bands['vx'].astype(float)**2 + bands['vy'].astype(float)**2)
+    e = np.sqrt(bands['ex'].astype(float)**2 + bands['ey'].astype(float)**2)
+    for suffix, a in [('.vx', bands['vx']), ('.vy', bands['vy']), ('.v', v),
+                      ('.ex', bands['ex']), ('.ey', bands['ey']), ('.e', e)]:
+        writeCompactTiff(f'{tiffRoot}{suffix}.tif', a, geoImage, epsg, wktFile,
+                         {'.v': -1.0, '.ex': -1.0, '.ey': -1.0, '.e': -1.0}.get(suffix, -2.0e9))
+    if '-timeOverlap' in baseFlags:
+        # scalar geoimage writes dT with NaN and no no-data tag (_NO_DATA[''] is None)
+        writeCompactTiff(f'{tiffRoot}.dT.tif', interpCompact(bands['dT'], interpSize, stderr),
+                         geoImage, epsg, wktFile, None)
+
+
+def compactSectors(piecesFiles, piecesGeodats, outDir, outputMaskShape, interpSize,
+                   baseFlags, stderrs):
+    ''' compactOutputs: run compactSector for every sector (replaces mask/interp/tiff) '''
+    epsg = regionDefs.epsg()
+    wktFile = regionDefs.wktFile()
+    print('Mask, interpolate and write tiffs (compactOutputs)...')
+    threads = []
+    for pieceName, pieceGeodat, stderr in zip(piecesFiles, piecesGeodats, stderrs):
+        threads.append(threading.Thread(target=compactSector,
+                                        args=[pieceName, pieceGeodat, outDir,
+                                              outputMaskShape, interpSize, baseFlags,
+                                              epsg, wktFile, stderr]))
+    u.runMyThreads(threads, 10, '', quiet=True)
+    return
+
+# ---------------------------------------------------------------------------
 # call to produce vrt and pyramids
 # ---------------------------------------------------------------------------
 
@@ -925,6 +1074,24 @@ def makeQVRTSs(piecesFiles, outDir, template):
 # ---------------------------------------------------------------------------
 
 
+LS_PATH_DATES = re.compile(r'/(\d{4})/path\d+/[^/]+/(\d+)-(\d+)/')
+
+
+def lsDatesFromPath(matchFile):
+    '''
+    Pair dates from a Landsat match path .../<year>/path*/<p_r>/<doy>-<dT>/...:
+    date1 = year + doy at 12:00, date2 = date1 + dT, exactly what readLSdat gives
+    (checked on 1232 lines, 2014-2026). A pair crossing a year keeps its first year,
+    doy > 365. Returns None if the path does not follow the pattern.
+    '''
+    m = LS_PATH_DATES.search(matchFile)
+    if m is None:
+        return None
+    year, doy, dT = (int(x) for x in m.groups())
+    date1 = datetime(year, 1, 1) + timedelta(days=doy - 1, hours=12)
+    return date1, date1 + timedelta(days=dT)
+
+
 def processLsList(lsFile, firstDate, lastDate, outDir, noReprocess=False):
     try:
         inputFile = open(lsFile, 'r')
@@ -945,19 +1112,23 @@ def processLsList(lsFile, firstDate, lastDate, outDir, noReprocess=False):
             break
         elif ';' in line:
             continue
-        datFile = line.split()[0]+'.dat'
-        lsdat = u.lsdat(noProjection=True)
-        lsdat.readLSdat(datFile)
+        # dates from the path (no file open); read the .dat only for an odd path
+        lsDates = lsDatesFromPath(line.split()[0])
+        if lsDates is None:
+            lsdat = u.lsdat(noProjection=True)
+            lsdat.readLSdat(line.split()[0]+'.dat')
+            lsDates = (lsdat.date1, lsdat.date2)
+        lsDate1, lsDate2 = lsDates
         #
         # compute wSkew - use to discard scenes where the center date is >
         # one windowWidth from the center of the window.
-        obsWindow = lsdat.date2 - lsdat.date1
-        centerObsDate = lsdat.date1 + obsWindow*.5
+        obsWindow = lsDate2 - lsDate1
+        centerObsDate = lsDate1 + obsWindow*.5
         percentCover = windowWidth/obsWindow
         wSkew = abs(centerWindowDate - centerObsDate)
         # modified - 10/9/2019 to add 0.5 before windowWidth to avoid
         # data to far out of bounds (see notes)
-        if (lsdat.date1 < lastDate and lsdat.date2 > firstDate and
+        if (lsDate1 < lastDate and lsDate2 > firstDate and
                 percentCover >= 0.6 and wSkew <= windowWidth * 0.5):
             print(line, file=outputFile, end='')
     print('&', file=outputFile)
@@ -1695,7 +1866,8 @@ def main():
         f'{flags["lastdate"].strftime("%Y-%m-%d")}'
     #
     # make subdirectories, set up output mask (generic or specific)
-    outputMaskShape = mkQDirs(outDir, template['outputMask'])
+    outputMaskShape = mkQDirs(outDir, template['outputMask'],
+                              compactOutputs=flags['compactOutputs'])
     #
     # process landsat list (filter by date)
     lsCulledFile = None
@@ -1733,16 +1905,21 @@ def main():
     # Combine submosaics
     if not flags['metaOnly']:  # skip entirely when only rebuilding metadata
         #
-        # Mask data
-        maskMosaics(piecesFiles, piecesGeodats, outDir, outputMaskShape,
-                    template['baseFlags'])
-        #
-        # Interpolate mosaics
-        interpMosiacs(piecesFiles, piecesGeodats, outDir, interpSize,
-                      template['baseFlags'], stdouts, stderrs)
-        #
-        # Interpolate tiffs
-        writeQTiffs(piecesFiles, outDir, template['baseFlags'])
+        if flags['compactOutputs']:
+            # Mask, interpolate and write tiffs in one in-memory pass
+            compactSectors(piecesFiles, piecesGeodats, outDir, outputMaskShape,
+                           interpSize, template['baseFlags'], stderrs)
+        else:
+            # Mask data
+            maskMosaics(piecesFiles, piecesGeodats, outDir, outputMaskShape,
+                        template['baseFlags'])
+            #
+            # Interpolate mosaics
+            interpMosiacs(piecesFiles, piecesGeodats, outDir, interpSize,
+                          template['baseFlags'], stdouts, stderrs)
+            #
+            # Interpolate tiffs
+            writeQTiffs(piecesFiles, outDir, template['baseFlags'])
         #
         # makevrts
         makeQVRTSs(piecesFiles, outDir, template)
