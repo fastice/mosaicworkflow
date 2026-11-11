@@ -276,3 +276,13 @@ in `/Volumes/insar4/ian/Data/NISAR/Antarctica-GCOV/mosaicTest/workflowTest/`.
 `refreshties.py` and `makeframetie.py` both accept `--useSquint`, which threads through to `tie_script` (i.e. `insarworkflow.tieScript`), which in turn passes `-useSquint` to both `mosaic3d` and `tiepoints -motion`. Default off; can also be set project-wide via `applySquintCorrection: true` in `project.yaml` and overridden per-run by `setupNISARTracks --useSquint`/`--noUseSquint`.
 
 See `mosaicSource/CLAUDE.md` "Squint (residual Doppler) sensitivity" for the C-side implementation and why this is off by default.
+
+## Per-sensor azimuth rows (`excludeRows`)
+
+`setupquarters.resolveExcludeRows` reads `excludeRows: {azimuth: [NISAR]}` from the template or
+`project.yaml` (CLI `--noAzimuthRowsSensors` > template > project.yaml > none) and appends
+`-noAzimuthRowsSensors NISAR` to baseFlags; mosaic3d then drops only those sensors' azimuth rows
+(sensor from each geodat label). Names: `NISAR`, `Sentinel1`/`S1`, `TSX`; unknown names or row
+types other than `azimuth` are errors. Used by `SentinelPIG/Release/S1-NISAR/project.yaml`
+(combined S1+NISAR mosaics: NISAR azimuth rows off, S1's kept). See
+`mosaicSource/Documents/mosaic3d.md` "Row selection".

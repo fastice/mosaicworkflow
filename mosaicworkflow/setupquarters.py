@@ -201,6 +201,71 @@ def resolveUseSquint(template, templatePath, cliUseSquint=False):
     return template
 
 
+# excludeRows sensor names (as in project.yaml 'sensor:') -> mosaic3d's names
+EXCLUDEROWSSENSORS = {'NISAR': 'NISAR', 'Sentinel1': 'Sentinel1', 'S1': 'Sentinel1',
+                      'TSX': 'TSX'}
+
+
+def resolveExcludeRows(template, templatePath, cliAzimuth=None):
+    '''
+    Resolve per-sensor row exclusions and append -noAzimuthRowsSensors to baseFlags:
+
+        excludeRows:
+          azimuth: [NISAR]      # drop NISAR azimuth rows; S1/TSX keep theirs
+
+    mosaic3d takes each product's sensor from its geodat label.  Only 'azimuth' is
+    implemented; other row types are rejected rather than silently ignored.
+
+    Priority (highest first):
+      1. CLI --noAzimuthRowsSensors (comma list)
+      2. template excludeRows key
+      3. project.yaml excludeRows key
+      4. Program default: no per-sensor exclusion
+    '''
+    if cliAzimuth is not None:
+        source, sensors = 'command line', [s for s in cliAzimuth.split(',') if s]
+    else:
+        templateValue = template.get('excludeRows', None)
+        projectValue = None
+        projectYamlPath = locateProjectYaml(template, templatePath)
+        if projectYamlPath is not None:
+            with open(projectYamlPath, 'r') as fp:
+                projectData = yaml.safe_load(fp) or {}
+            projectValue = projectData.get('excludeRows', None)
+        if templateValue is not None:
+            source, value = 'template', templateValue
+            if projectValue is not None and projectValue != templateValue:
+                u.mywarning(f'resolveExcludeRows: template excludeRows={templateValue} '
+                            f'overrides project.yaml excludeRows={projectValue}')
+        elif projectValue is not None:
+            source, value = projectYamlPath, projectValue
+        else:
+            return template
+        if not isinstance(value, dict):
+            u.myerror(f'resolveExcludeRows: excludeRows must be a mapping such as '
+                      f'{{azimuth: [NISAR]}}, got {value!r} ({source})')
+        unknownRows = set(value) - {'azimuth'}
+        if unknownRows:
+            u.myerror(f'resolveExcludeRows: row type(s) {sorted(unknownRows)} not supported '
+                      f'(only azimuth) ({source})')
+        sensors = value.get('azimuth') or []
+        if isinstance(sensors, str):
+            sensors = [sensors]
+    badSensors = [s for s in sensors if s not in EXCLUDEROWSSENSORS]
+    if badSensors:
+        u.myerror(f'resolveExcludeRows: unknown sensor(s) {badSensors} ({source}); '
+                  f'use {sorted(EXCLUDEROWSSENSORS)}')
+    if not sensors:
+        return template
+    if '-noAzimuthRowsSensors' in template['baseFlags']:
+        u.myerror('resolveExcludeRows: inconsistent configuration -- excludeRows is set '
+                  'and baseFlags already contains -noAzimuthRowsSensors. Remove one.')
+    names = sorted({EXCLUDEROWSSENSORS[s] for s in sensors})
+    template['baseFlags'] += f' -noAzimuthRowsSensors {",".join(names)}'
+    print(f'excludeRows ({source}): azimuth rows dropped for {", ".join(names)}')
+    return template
+
+
 def resolveBooleanBaseFlag(template, templatePath, key, mosaic3dFlag, cliValue=False):
     '''
     Resolve a boolean mosaic3d flag from CLI, template, and project.yaml, then append
@@ -309,6 +374,8 @@ def processFlags(args, template):
     template = resolveSepAscDesc(template, args.template)
     template = resolveUseSquint(template, args.template,
                                 getattr(args, 'useSquint', False))
+    template = resolveExcludeRows(template, args.template,
+                                  getattr(args, 'noAzimuthRowsSensors', None))
     template = resolveNumericBaseFlag(template, args.template, 'timeThresh',
                                      'timeThresh',
                                      cliValue=getattr(args, 'timeThresh', None))
@@ -416,6 +483,9 @@ def processQArgs():
     # template/project.yaml
     parser.add_argument('--useSquint', action='store_true', default=False,
                         help='Pass -useSquint to mosaic3d (overrides template/project.yaml)')
+    parser.add_argument('--noAzimuthRowsSensors', type=str, default=None,
+                        help='Comma list of sensors (NISAR, Sentinel1/S1, TSX) whose azimuth '
+                             'rows mosaic3d drops; overrides template/project.yaml excludeRows')
     parser.add_argument('--timeThresh', type=float, default=None,
                         help='Max days between crossing-orbit offset pairs (mosaic3d default 12)')
     parser.add_argument('--jointMaxSigmaPhase', type=float, default=None,

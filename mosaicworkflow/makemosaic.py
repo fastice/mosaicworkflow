@@ -68,6 +68,12 @@ TEMPLATE_KEYS = [
          'None defers to project.yaml useSquint key; '
          'template takes precedence over project.yaml'),
     ]),
+    ('Optional, per-sensor row exclusion (see setupquarters.resolveExcludeRows)', [
+        ('excludeRows', 'None (all sensors keep all rows)',
+         'Mapping {azimuth: [NISAR, ...]}: appends -noAzimuthRowsSensors so mosaic3d drops '
+         'the azimuth rows of those sensors only (sensor from each geodat label); '
+         'template takes precedence over project.yaml'),
+    ]),
     ('Optional, azimuth ionosphere correction (see setupquarters.resolveBooleanBaseFlag)', [
         ('applyAzimuthIonosphereCorrection', 'False (program default)',
          'True appends -useAzIonosphere to baseFlags, so mosaic3d applies the '
