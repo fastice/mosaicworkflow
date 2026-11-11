@@ -398,6 +398,8 @@ def processFlags(args, template):
     template = resolveNumericBaseFlag(template, args.template, 'chi2SpeedFrac',
                                      'chi2SpeedFrac',
                                      cliValue=getattr(args, 'chi2SpeedFrac', None))
+    template = resolveBooleanBaseFlag(template, args.template, 'zeroRock', 'zeroRock',
+                                      cliValue=getattr(args, 'zeroRock', False))
     template = resolveBooleanBaseFlag(template, args.template, 'legacyPairPhase',
                                       'legacyPairPhase',
                                       cliValue=getattr(args, 'legacyPairPhase', False))
@@ -500,6 +502,9 @@ def processQArgs():
     parser.add_argument('--chi2SpeedFrac', type=float, default=None,
                         help='Speed-dependent maxChi2: model error F*|v| for real change within '
                              'the window; overrides template and project.yaml [mosaic3d default 0 = off]')
+    parser.add_argument('--zeroRock', action='store_true', default=False,
+                        help='Pass -zeroRock to mosaic3d: zero velocity on rock outcrop (needs a '
+                             'mosaicMask built with makeIceMask.py --rock); overrides template/project.yaml')
     parser.add_argument('--legacyPairPhase', action='store_true', default=False,
                         help='Use the ORIGINAL pairwise crossing-phase solver')
     parser.add_argument('--legacyPairRange', action='store_true', default=False,
