@@ -19,6 +19,8 @@ from PIL import Image
 from PIL import ImageFont
 from PIL import ImageDraw
 import gc
+import shlex
+from mosaicworkflow.softwareVersions import pythonVersions, cVersionsFromPieces
 import json
 import re
 import yaml
@@ -1498,8 +1500,27 @@ def finalName(vrt, flags, pType):
     return name
 
 
+def releaseMetadata(outDir, flags):
+    '''
+    Traceability keys for the release tiffs: the product version (as in the file name), the
+    mosaicSource build read back from the pieces, and the Python package versions/commits
+    '''
+    myPrefix = prodType(flags['firstdate'], flags['lastdate'])
+    meta = {'productVersion': f'v{currentVersions[myPrefix]:02d}.{subVersions[myPrefix]}'}
+    cMeta = cVersionsFromPieces(f'{outDir}/pieces')
+    if not cMeta:
+        print('releaseMetadata: no mosaicSource version in pieces/ (made before versioning)')
+    meta.update(cMeta)
+    meta.update(pythonVersions())
+    for key, value in meta.items():
+        print(f'{key}: {value}')
+    return meta
+
+
 def processFinalVRTs(outDir, releaseDir, flags):
     ''' Use the vrts for the individual pieces to build the finall tiffs'''
+    metaOptions = ' '.join(f'-mo {shlex.quote(f"{key}={value}")}'
+                           for key, value in releaseMetadata(outDir, flags).items())
     u.pushd(outDir+'/tiff')
     vrts = sorted(glob.glob('*.vrt'))
     #
@@ -1511,7 +1532,7 @@ def processFinalVRTs(outDir, releaseDir, flags):
         # vrt (if single, would be automatic)
         command = 'gdal_translate -of COG -co COMPRESS=DEFLATE ' \
             '-co RESAMPLING=AVERAGE -co OVERVIEWS=IGNORE_EXISTING ' \
-            '-co GEOTIFF_VERSION=1.1 -co BIGTIFF=NO -stats ' \
+            f'-co GEOTIFF_VERSION=1.1 -co BIGTIFF=NO -stats {metaOptions} ' \
             f'{vrt} ../release/{pName}'
         print(command)
         threads.append(threading.Thread(target=call, args=[command],
