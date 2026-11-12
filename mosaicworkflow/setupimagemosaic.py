@@ -23,6 +23,7 @@ import shlex
 from osgeo import gdal
 from PIL import Image
 from mosaicworkflow.setupquarters import addLabel, messageLines
+from mosaicworkflow.softwareVersions import pythonVersions, cVersionsFromPieces
 
 currentVersion = 4
 subVersion = 0
@@ -213,6 +214,25 @@ def setupImageMosaicArgs():
                                   angleStride is not None or angleRamp):
         u.myerror('angleTolerance/angleStride require rangeSelect near or far')
     ompThreads = args.ompThreads or templateDict.get('ompThreads', None)
+    # Fill tiers: lower-priority tracks used only where trackOrder has no data,
+    # and only where the frozen fillMask raster allows their tier
+    fillTrackOrder = templateDict.get('fillTrackOrder', None) or []
+    fillMask = templateDict.get('fillMask', None)
+    fillTracks = [str(t) for tier in fillTrackOrder for t in tier]
+    if fillTracks:
+        if '*' in templateDict['trackOrder']:
+            u.myerror('fillTrackOrder needs an explicit trackOrder, not *')
+        if set(fillTracks) & set(tracks) or \
+                len(set(fillTracks)) != len(fillTracks):
+            u.myerror(f'fillTrackOrder {fillTrackOrder} repeats a track')
+        tracks = list(tracks) + fillTracks
+        if calFlag == 'corr':
+            u.myerror('fillTrackOrder is not supported for corr mosaics')
+    if fillMask is not None:
+        if not os.path.exists(fillMask):
+            u.myerror(f'fillMask {fillMask} does not exist')
+        if not fillTracks:
+            fillMask = None
     if gcov is not None:
         gcov = os.path.abspath(gcov)  # geomosaic runs in the pieces directory
         if not os.path.exists(gcov):
@@ -247,7 +267,7 @@ def setupImageMosaicArgs():
               'ompThreads': ompThreads, 'rangeSelect': rangeSelect,
               'angleTolerance': angleTolerance, 'angleStride': angleStride,
               'angleRamp': angleRamp, 'minIncidence': minIncidence,
-              'maxIncidence': maxIncidence}
+              'maxIncidence': maxIncidence, 'fillMask': fillMask}
     return myArgs
 
 
@@ -432,6 +452,8 @@ def geoMosaicExtraFlags(myArgs):
         flags += f' -gcov {myArgs["gcov"]}'
     if myArgs.get('ompThreads') is not None:
         flags += f' -ompThreads {myArgs["ompThreads"]}'
+    if myArgs.get('fillMask') is not None:
+        flags += f' -fillMask {myArgs["fillMask"]}'
     if myArgs.get('rangeSelect', 'none') in ('near', 'far'):
         flags += f' -{myArgs["rangeSelect"]}Range'
         if myArgs.get('angleTolerance') is not None:
@@ -770,6 +792,11 @@ def mergeImageTiles(prodDir, prefix, date1, date2, posting, corners,
     jpgRes = '500'
     try:  # Use try so cleanUp won't occur if there is a problem
         u.pushd(directory=f'{prodDir}/pieces')
+        # traceability: product version, geomosaic build (from the tiles), Python commits
+        versionMeta = {'productVersion': f'v{currentVersion:02d}.{subVersion}',
+                       **cVersionsFromPieces('.'), **pythonVersions()}
+        messageMeta += ''.join(f'-mo {shlex.quote(f"{k}={v}")} '
+                               for k, v in versionMeta.items())
         #
         prodName = makeProdName(prefix, date1, date2)
         satTypes = {k: False for k in ['S1A', 'S1B', 'S1C', 'S1D', 'NISAR']}

@@ -3,8 +3,11 @@ pyproject.toml
 mosaicworkflow/__init__.py
 mosaicworkflow/autoclean.py
 mosaicworkflow/autocleanNISAR.py
+mosaicworkflow/checkExclude.py
+mosaicworkflow/checkinput.py
 mosaicworkflow/checkvelsize.py
 mosaicworkflow/cleanoffmerge.py
+mosaicworkflow/cleanpoly.py
 mosaicworkflow/grepdate.py
 mosaicworkflow/grepnisar.py
 mosaicworkflow/initRAReference.py
