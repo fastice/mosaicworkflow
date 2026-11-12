@@ -38,9 +38,9 @@ regionDefs = None
 outputMaskTemplate = None
 regionID = None
 
-currentVersions = {'s1cycle': 4, 's1-12day': 4, 'Monthly': 6, 'Quarterly': 6,
+currentVersions = {'s1cycle': 3, 's1-12day': 3, 'Monthly': 6, 'Quarterly': 6,
                    'Annual': 6, 'multiYear': 1}   # Monthly/Quarterly/Annual 6: S1 SMB fix (.v2 grid), 2026-10
-# s1cycle 4 (2026-11-11): v06 processing (phase, hopper3D, NISAR); matches the NSIDC-0766 Version 4 guide
+# s1cycle 3 (2026-11-12): v06 processing (phase, hopper3D, NISAR); NSIDC-0766 current is Version 2 (0766.002)
 subVersions = {'s1cycle': 0, 'Monthly': 0, 'Quarterly': 0, 'Annual': 0,
                'multiYear': 0}
 
