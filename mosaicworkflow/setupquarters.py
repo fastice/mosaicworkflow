@@ -344,6 +344,34 @@ def resolveNumericBaseFlag(template, templatePath, key, mosaic3dFlag, cliValue=N
     return template
 
 
+def resolveMaxSpeed(template, templatePath):
+    '''
+    Resolve maxSpeed (m/yr): template key, else project.yaml key, else None (off).
+    Sector pixels faster than this are blanked, like masked pixels, before the
+    intfloat hole fill (maskMosaic/compactSector), so a solver blow-up is neither
+    released nor interpolated into its neighbours.  Set per ice sheet in project.yaml
+    (Greenland 20000, Antarctica 6500, 2026-11-18).
+    '''
+    templateVal = template.get('maxSpeed', None)
+    projectVal = None
+    projectYamlPath = locateProjectYaml(template, templatePath)
+    if projectYamlPath is not None:
+        with open(projectYamlPath, 'r') as fp:
+            projectVal = (yaml.safe_load(fp) or {}).get('maxSpeed', None)
+    if templateVal is not None:
+        if projectVal is not None and projectVal != templateVal:
+            u.mywarning(f'resolveMaxSpeed: template value {templateVal} '
+                        f'overrides project.yaml value {projectVal}')
+        template['maxSpeed'] = float(templateVal)
+    elif projectVal is not None:
+        template['maxSpeed'] = float(projectVal)
+    else:
+        template['maxSpeed'] = None
+    if template['maxSpeed'] is not None:
+        print(f'maxSpeed: blanking sector speeds > {template["maxSpeed"]:.0f} m/yr before interpolation')
+    return template
+
+
 def processFlags(args, template):
     '''
     Create dictionary with relevant flags
@@ -383,6 +411,7 @@ def processFlags(args, template):
             u.myerror(f'processFlags: threeDMask {threeDMask} does not exist')
         template['baseFlags'] += f' -threeDMask {threeDMask} '
     template = resolveSepAscDesc(template, args.template)
+    template = resolveMaxSpeed(template, args.template)
     template = resolveUseSquint(template, args.template,
                                 getattr(args, 'useSquint', False))
     template = resolveExcludeRows(template, args.template,
@@ -813,7 +842,7 @@ def changeToNoCull(line):
 
 
 def maskMosaic(pieceName, pieceGeodat, outDir, outputMaskShape,
-               baseFlags):
+               baseFlags, maxSpeed=None):
     #
     # make mask for region quadName
     mask = u.makeMaskFromShape(pieceGeodat, outputMaskShape)
@@ -825,8 +854,13 @@ def maskMosaic(pieceName, pieceGeodat, outDir, outputMaskShape,
     piecePath = f'{outDir}/pieces/{pieceName}'
     velImage.readData(piecePath)
     # mask velocity
-    if len(mask) > 1:
-        imask = mask < 1
+    imask = mask < 1 if len(mask) > 1 else None
+    if maxSpeed is not None:
+        # blank speeds above maxSpeed (solver blow-ups) with the masked pixels
+        with np.errstate(invalid='ignore'):
+            tooFast = np.hypot(velImage.vx, velImage.vy) > maxSpeed
+        imask = tooFast if imask is None else (imask | tooFast)
+    if imask is not None:
         velImage.vx[imask] = np.nan
         velImage.vy[imask] = np.nan
         velImage.v[imask] = np.nan
@@ -839,7 +873,7 @@ def maskMosaic(pieceName, pieceGeodat, outDir, outputMaskShape,
     # read errors
     errImage.readData(piecePath)
     # mask errors
-    if len(mask) > 1:
+    if imask is not None:
         errImage.ex[imask] = np.nan
         errImage.ey[imask] = np.nan
     # write errors
@@ -849,14 +883,14 @@ def maskMosaic(pieceName, pieceGeodat, outDir, outputMaskShape,
     if '-timeOverlap' in baseFlags:
         dT = u.geoimage(geoType='scalar', verbose=False)
         dT.readData(f'{piecePath}.dT')
-        if len(mask) > 1:
+        if imask is not None:
             dT.x[imask] = np.nan
         dT.writeData(f'{outDir}/masked/{pieceName}.dT')
         dT = []
 
 
 def maskMosaics(piecesFiles, piecesGeodats, outDir, outputMaskShape,
-                baseFlags):
+                baseFlags, maxSpeed=None):
     #
     # loop through each regional mosaic (north...)
     print('Mask mosaics...')
@@ -867,7 +901,8 @@ def maskMosaics(piecesFiles, piecesGeodats, outDir, outputMaskShape,
                                               pieceGeodat,
                                               outDir,
                                               outputMaskShape,
-                                              baseFlags]))
+                                              baseFlags,
+                                              maxSpeed]))
     u.runMyThreads(threads, 10, '', quiet=True)
     return
 
@@ -1088,7 +1123,7 @@ def writeCompactTiff(fileName, a, geoImage, epsg, wktFile, noData):
 
 
 def compactSector(pieceName, pieceGeodat, outDir, outputMaskShape, interpSize,
-                  baseFlags, epsg, wktFile, stderr):
+                  baseFlags, epsg, wktFile, stderr, maxSpeed=None):
     '''
     compactOutputs version of maskMosaic + interpMosiacs + writeQTiff for one sector:
     reads the -GTiff pieces, masks in memory, pipes vx/vy/dT through intfloat, and
@@ -1108,7 +1143,13 @@ def compactSector(pieceName, pieceGeodat, outDir, outputMaskShape, interpSize,
         components.append('dT')
     for c in components:
         bands[c] = readCompactPiece(f'{piecePath}.{c}.tif')
-        if imask is not None:
+    if maxSpeed is not None:
+        # blank speeds above maxSpeed (solver blow-ups) with the masked pixels
+        with np.errstate(invalid='ignore'):
+            tooFast = np.hypot(bands['vx'], bands['vy']) > maxSpeed
+        imask = tooFast if imask is None else (imask | tooFast)
+    if imask is not None:
+        for c in components:
             bands[c][imask] = np.nan
     geoImage.vx = bands['vx']
     for c in ['vx', 'vy']:
@@ -1126,7 +1167,7 @@ def compactSector(pieceName, pieceGeodat, outDir, outputMaskShape, interpSize,
 
 
 def compactSectors(piecesFiles, piecesGeodats, outDir, outputMaskShape, interpSize,
-                   baseFlags, stderrs):
+                   baseFlags, stderrs, maxSpeed=None):
     ''' compactOutputs: run compactSector for every sector (replaces mask/interp/tiff) '''
     epsg = regionDefs.epsg()
     wktFile = regionDefs.wktFile()
@@ -1136,7 +1177,7 @@ def compactSectors(piecesFiles, piecesGeodats, outDir, outputMaskShape, interpSi
         threads.append(threading.Thread(target=compactSector,
                                         args=[pieceName, pieceGeodat, outDir,
                                               outputMaskShape, interpSize, baseFlags,
-                                              epsg, wktFile, stderr]))
+                                              epsg, wktFile, stderr, maxSpeed]))
     u.runMyThreads(threads, 10, '', quiet=True)
     return
 
@@ -2042,11 +2083,12 @@ def main():
         if flags['compactOutputs']:
             # Mask, interpolate and write tiffs in one in-memory pass
             compactSectors(piecesFiles, piecesGeodats, outDir, outputMaskShape,
-                           interpSize, template['baseFlags'], stderrs)
+                           interpSize, template['baseFlags'], stderrs,
+                           maxSpeed=template.get('maxSpeed'))
         else:
             # Mask data
             maskMosaics(piecesFiles, piecesGeodats, outDir, outputMaskShape,
-                        template['baseFlags'])
+                        template['baseFlags'], maxSpeed=template.get('maxSpeed'))
             #
             # Interpolate mosaics
             interpMosiacs(piecesFiles, piecesGeodats, outDir, interpSize,
