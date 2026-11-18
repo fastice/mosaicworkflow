@@ -1571,10 +1571,19 @@ def processFinalVRTs(outDir, releaseDir, flags):
         pName = finalName(vrt, flags, pType)
         # cloud optimize - use rio because it works with the
         # vrt (if single, would be automatic)
-        command = 'gdal_translate -of COG -co COMPRESS=DEFLATE ' \
+        # PREDICTOR=YES uses the floating-point predictor for float bands: lossless, ~18% smaller,
+        # and still readable by IDL 8.5 (ZSTD and LERC are not). dT also drops 10 mantissa bits
+        # (<1.2e-4 relative), which the COG driver cannot do, so it goes through a GTiff first.
+        src, prep, cleanup = vrt, '', ''
+        if pType == 'dT':
+            src = f'{vrt}.lsb.tif'
+            prep = 'gdal_translate -co TILED=YES -co COMPRESS=DEFLATE -co PREDICTOR=3 ' \
+                f'-co DISCARD_LSB=10 -co BIGTIFF=IF_SAFER {vrt} {src} && '
+            cleanup = f' && rm -f {src}'
+        command = prep + 'gdal_translate -of COG -co COMPRESS=DEFLATE -co PREDICTOR=YES ' \
             '-co RESAMPLING=AVERAGE -co OVERVIEWS=IGNORE_EXISTING ' \
             f'-co GEOTIFF_VERSION=1.1 -co BIGTIFF=NO -stats {metaOptions} ' \
-            f'{vrt} ../release/{pName}'
+            f'{src} ../release/{pName}' + cleanup
         print(command)
         threads.append(threading.Thread(target=call, args=[command],
                                         kwargs={'shell': True,
