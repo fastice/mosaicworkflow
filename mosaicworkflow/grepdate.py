@@ -130,7 +130,7 @@ def getProducts(date1, date2, frame1, frame2, sensor):
 
     '''
     productDirs = []
-    for pattern in ['????_*', '?????_*', '???_*']:
+    for pattern in ['????_*', '?????_*', '??????_*', '???_*']:
         productDirs += glob.glob(pattern)
     products = []
     for product in productDirs:
