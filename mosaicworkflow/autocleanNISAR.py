@@ -48,6 +48,12 @@ from mosaicworkflow.velocityStats import referenceSigmaFloor
 gdal.UseExceptions()
 
 COUNT_THRESH = 7.0  # matches velocityStats.py normStats()'s countThresh
+# --noReferenceKeep (default off): where the reference simulation (offsets.velocity) has no data, judge a pixel by
+# velocityStats' accumulated data alone where that has full weight (navg >= COUNT_THRESH), and keep it otherwise
+# (it cannot be judged).
+# Off, a pixel there is NaN -> bad. Needs a simulation that writes no data there (simoffsets --noDataWithoutVelocity);
+# the default simulation writes the stationary (geometric) offset instead, which this cannot detect.
+NO_REFERENCE_KEEP = False
 
 
 def resolveRegionDef(trackDir):
@@ -191,7 +197,7 @@ def embedMaskBand(vrtFile, maskTif):
     tree.write(vrtFile)
 
 
-def evaluateFrame(frameDir, trackDir='.', sigThresh=3.0, framePattern='00??'):
+def evaluateFrame(frameDir, trackDir='.', sigThresh=3.0, framePattern='00??', noReferenceKeep=None):
     '''
     Compute range/azimuth valid-pixel masks for one real frame directory
     (e.g. track-N/<orbit>_<frame>). Returns (goodR, goodA, biasR, biasA) --
@@ -333,6 +339,21 @@ def evaluateFrame(frameDir, trackDir='.', sigThresh=3.0, framePattern='00??'):
     # fraction of the frame is currently reading as "bad", unlike a plain
     # mean, which that same population would drag off-center) before testing
     # against sigma, or the sigma test conflates "biased" with "bad".
+    if noReferenceKeep is None:
+        noReferenceKeep = NO_REFERENCE_KEEP
+    unknownR = unknownA = np.zeros(drExpected.shape, bool)
+    if noReferenceKeep:
+        noRefR = ~np.isfinite(velSim.rgOffSim) | (velSim.rgOffSim <= -1.e9)
+        noRefA = ~np.isfinite(velSim.azOffSim) | (velSim.azOffSim <= -1.e9)
+        haveData = nAvgSafe >= COUNT_THRESH                    # thin accumulated data is not trusted on its own
+        drExpected = np.where(noRefR, geom.rgGeom + vrSafe * scaleR, drExpected)
+        daExpected = np.where(noRefA, geom.azGeom + vaSafe * scaleA, daExpected)
+        sigmaDr = np.where(noRefR, erSafe * scaleR, sigmaDr)
+        sigmaDa = np.where(noRefA, eaSafe * scaleA, sigmaDa)
+        unknownR, unknownA = noRefR & ~haveData, noRefA & ~haveData
+        print(f'autocleanNISAR: no reference simulation on {np.mean(noRefR):.1%} of the range grid '
+              f'({np.mean(unknownR):.1%} without accumulated data either: kept)')
+
     diffR = rangeMeasured - drExpected
     diffA = azOff.off - daExpected
     biasR = np.nanmedian(diffR)
@@ -345,6 +366,8 @@ def evaluateFrame(frameDir, trackDir='.', sigThresh=3.0, framePattern='00??'):
     # rather than needing explicit NaN handling.
     goodR = np.abs(diffR - biasR) <= sigThresh * sigmaDr
     goodA = np.abs(diffA - biasA) <= sigThresh * sigmaDa
+    goodR |= unknownR & np.isfinite(rangeMeasured)
+    goodA |= unknownA & np.isfinite(azOff.off)
 
     rangeMaskTif = os.path.join(frameDir, 'range.offsets.good.tif')
     azMaskTif = os.path.join(frameDir, 'azimuth.offsets.good.tif')
@@ -598,7 +621,14 @@ def main():
                             'range.offsets.vrt already carries an embedded '
                             'autoclean mask; only (re)clean not-yet-cleaned '
                             'frames. Ignored for a single explicit frame.')
+    parser.add_argument('--noReferenceKeep', action='store_true',
+                        help='Where the reference simulation has no data, judge by the accumulated '
+                            'velocityStats data alone where navg >= 7, and keep the pixel otherwise (default: '
+                            'such pixels are bad). Needs offsets.velocity made with simoffsets '
+                            '--noDataWithoutVelocity.')
     args = parser.parse_args()
+    global NO_REFERENCE_KEEP
+    NO_REFERENCE_KEEP = args.noReferenceKeep
 
     if args.tracks is not None:
         if args.frame is not None or args.allFrames:

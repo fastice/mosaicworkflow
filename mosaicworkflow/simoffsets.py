@@ -307,6 +307,11 @@ def simOffsetsProcessArgs1():
                         'velocity product only. Outputs are byte-identical to two separate calls [None]')
     parser.add_argument('--alsoVelocityAzOffsets', type=str, default=None,
                         help='azOffsets for --alsoVelocity [VELOCITY.dat with .dat -> .da]')
+    parser.add_argument('--noDataWithoutVelocity', action='store_true', default=False,
+                        help='Where the velocity map has no data, write no data (-2e9) instead of the '
+                        'zero-velocity (geometric) offset, so a gap in the map is not read downstream as '
+                        'stationary ice (e.g. by autoclean beyond a reference map\'s old ice front). '
+                        'Off by default: ROFFtoGrimp uses the simulation as the culling guess [False]')
     parser.add_argument('--smoothNIter', type=int, default=3,
                         help='Variable smoothing-radius map: repeated box-filter passes '
                         'per sweep step (Gaussian-ish) [3]')
@@ -353,7 +358,8 @@ def simOffsetsProcessArgs1():
         byteOrder, args.ompThreads, args.iceRockWaterMask, args.iceMask, args.tiff, \
         args.verticalCorrection, fp, failFile, args.minTol, args.percentSpeed, \
         args.maxTol, args.maxSmoothRadius, args.maxSmoothRadiusA, \
-        args.smoothThreads, args.smoothNIter, args.alsoVelocity, args.alsoVelocityAzOffsets
+        args.smoothThreads, args.smoothNIter, args.alsoVelocity, args.alsoVelocityAzOffsets, \
+        args.noDataWithoutVelocity
 
 
 def resolveRegion(args):
@@ -873,7 +879,8 @@ def loadSimOffsets(azOffsets, offsetsDat, geodatFile, tiff):
 
 def finishSimOffsets(offsets1, dr0, da0, deltaT, azOffsets, offsetsDat, myRegion, useVel,
                      verticalCorrection, byteOrder, tiff, minTol, percentSpeed, maxTol,
-                     maxSmoothRadius, maxSmoothRadiusA, smoothThreads, smoothNIter):
+                     maxSmoothRadius, maxSmoothRadiusA, smoothThreads, smoothNIter,
+                     noDataWithoutVelocity=False):
     """ Add motion to the static offsets dr0/da0 (modified in place), write the product """
     #
     # compute motion offsets
@@ -901,6 +908,8 @@ def finishSimOffsets(offsets1, dr0, da0, deltaT, azOffsets, offsetsDat, myRegion
         drVCorrect = computeVerticalCorrectionOffset(verticalCorrection, offsets1,
                                                       myRegion.srsInfo(), deltaT)
         dr[~imissing] -= drVCorrect[~imissing]
+    if useVel and noDataWithoutVelocity:
+        imissing = imissing | ~np.isfinite(vr)                  # no velocity: no data, not stationary
     dr[imissing] = -2.e9
     #
     # merge offsets
@@ -967,7 +976,7 @@ def main():
         fastMask, useVel, byteOrder, ompThreads, iceRockWaterMask, iceMask, tiff, \
         verticalCorrection, fp, failFile, minTol, percentSpeed, maxTol, \
         maxSmoothRadius, maxSmoothRadiusA, smoothThreads, smoothNIter, \
-        velocityDat, velocityAzOffsets = simOffsetsProcessArgs1()
+        velocityDat, velocityAzOffsets, noDataWithoutVelocity = simOffsetsProcessArgs1()
     #
     for key in myRegion.region:
         print(myRegion.region[key])
@@ -1039,7 +1048,8 @@ def main():
     if velocityDat is None:
         finishSimOffsets(offsets1, dr0, da0, deltaT, azOffsets, offsetsDat, myRegion, useVel,
                          verticalCorrection, byteOrder, tiff, minTol, percentSpeed, maxTol,
-                         maxSmoothRadius, maxSmoothRadiusA, smoothThreads, smoothNIter)
+                         maxSmoothRadius, maxSmoothRadiusA, smoothThreads, smoothNIter,
+                         noDataWithoutVelocity=noDataWithoutVelocity)
     else:
         # geometry product exactly as a -noVel call (no vertical correction, no smoothing map)
         finishSimOffsets(offsets1, dr0.copy(), da0.copy(), deltaT, azOffsets, offsetsDat,
@@ -1050,7 +1060,8 @@ def main():
         writeOffPoly(velocityDat.replace('.dat', '.poly'), coeffR, coeffA)
         finishSimOffsets(offsets2, dr0, da0, deltaT, velocityAzOffsets, velocityDat, myRegion,
                          True, verticalCorrection, byteOrder, tiff, minTol, percentSpeed,
-                         maxTol, maxSmoothRadius, maxSmoothRadiusA, smoothThreads, smoothNIter)
+                         maxTol, maxSmoothRadius, maxSmoothRadiusA, smoothThreads, smoothNIter,
+                         noDataWithoutVelocity=noDataWithoutVelocity)
         velFp.close()
         if os.path.isfile(velFailFile):
             os.remove(velFailFile)

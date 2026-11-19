@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mosaicworkflow"
-version = "1.0.5"
+version = "1.0.6"
 description = "Greenland Ice Mapping Project (GrIMP) workflow programs"
 authors = [
     { name = "Ian Joughin", email = "irj@uw.edu" }
