@@ -785,7 +785,14 @@ def mergeImageTiles(prodDir, prefix, date1, date2, posting, corners,
     #              'calibrated': ['calibrated', 'calibrated']}[calFlag]
     suffixes = calSuffixes(calFlag, calOutput)
     noData = INT16_NODATA if int16 else noDataDict[calFlag]
-    predictor = '-co PREDICTOR=YES ' if int16 else ''
+    # Byte uncalibrated COGs: horizontal predictor + level 9 is lossless and ~9% smaller
+    # (2026-11-18). Float32 calibrated/corr are left without one: there it grew the file ~34%.
+    if int16:
+        predictor = '-co PREDICTOR=YES '
+    elif calFlag == 'uncalibrated':
+        predictor = '-co PREDICTOR=YES -co LEVEL=9 '
+    else:
+        predictor = ''
     lines = messageLines(message)
     messageMeta = f'-mo {shlex.quote("message=" + "; ".join(lines))} ' \
         if lines else ''
